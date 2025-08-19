@@ -10,10 +10,12 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from dotenv import load_dotenv
+from datetime import datetime, date, UTC
 
 # ====== Config ======
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 # ====== UI ======
 MAIN_KB = ReplyKeyboardMarkup(
@@ -59,6 +61,52 @@ class DB:
                     FOREIGN KEY(employee_id) REFERENCES employees(id) ON DELETE CASCADE
                 )
             """)
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS employee_busy (
+                    employee_id INTEGER NOT NULL,
+                    date_str TEXT NOT NULL,
+                    UNIQUE(employee_id, date_str),
+                    FOREIGN KEY(employee_id) REFERENCES employees(id) ON DELETE CASCADE
+                )
+                """
+            )
+            # monthly busy window, logs, and submissions
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS busy_window (
+                    year INTEGER NOT NULL,
+                    month INTEGER NOT NULL,
+                    opened_at TEXT,
+                    broadcast_sent INTEGER DEFAULT 0,
+                    PRIMARY KEY(year, month)
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS busy_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    employee_id INTEGER NOT NULL,
+                    action TEXT NOT NULL, -- add/remove/clear
+                    payload TEXT NOT NULL,
+                    ts TEXT NOT NULL,
+                    FOREIGN KEY(employee_id) REFERENCES employees(id) ON DELETE CASCADE
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_submissions (
+                    employee_id INTEGER NOT NULL,
+                    year INTEGER NOT NULL,
+                    month INTEGER NOT NULL,
+                    submitted_at TEXT NOT NULL,
+                    UNIQUE(employee_id, year, month),
+                    FOREIGN KEY(employee_id) REFERENCES employees(id) ON DELETE CASCADE
+                )
+                """
+            )
             # migration from legacy employees(name)
             # try to detect old schema and migrate rows
             try:
@@ -86,6 +134,71 @@ class DB:
             except Exception:
                 pass
             con.commit()
+    def ensure_window(self, year: int, month: int):
+        with self._conn() as con:
+            con.execute(
+                "INSERT OR IGNORE INTO busy_window(year, month, opened_at) VALUES(?,?,?)",
+                (year, month, datetime.now(UTC).isoformat()),
+            )
+            con.commit()
+
+    def get_window(self, year: int, month: int):
+        with self._conn() as con:
+            return con.execute(
+                "SELECT year, month, opened_at, broadcast_sent FROM busy_window WHERE year=? AND month=?",
+                (year, month),
+            ).fetchone()
+
+    def mark_broadcast_sent(self, year: int, month: int):
+        with self._conn() as con:
+            con.execute(
+                "UPDATE busy_window SET broadcast_sent=1 WHERE year=? AND month=?",
+                (year, month),
+            )
+            con.commit()
+
+    def list_employees_with_tg(self) -> list[tuple[int, str, int]]:
+        with self._conn() as con:
+            rows = con.execute(
+                "SELECT id, display, tg_id FROM employees WHERE tg_id IS NOT NULL AND LENGTH(tg_id)>0"
+            ).fetchall()
+            # return (id, display, tg_id as int)
+            res = []
+            for i, d, tg in rows:
+                try:
+                    res.append((i, d, int(tg)))
+                except Exception:
+                    continue
+            return res
+
+    def log_busy(self, employee_id: int, action: str, payload: str):
+        with self._conn() as con:
+            con.execute(
+                "INSERT INTO busy_log(employee_id, action, payload, ts) VALUES(?,?,?,?)",
+                (employee_id, action, payload, datetime.now(UTC).isoformat()),
+            )
+            con.commit()
+
+    def set_submitted(self, employee_id: int, year: int, month: int):
+        with self._conn() as con:
+            con.execute(
+                "INSERT OR IGNORE INTO user_submissions(employee_id, year, month, submitted_at) VALUES(?,?,?,?)",
+                (employee_id, year, month, datetime.now(UTC).isoformat()),
+            )
+            con.commit()
+
+    def has_submitted(self, employee_id: int, year: int, month: int) -> bool:
+        with self._conn() as con:
+            row = con.execute(
+                "SELECT 1 FROM user_submissions WHERE employee_id=? AND year=? AND month=?",
+                (employee_id, year, month),
+            ).fetchone()
+            return bool(row)
+
+    def list_all_employees(self) -> list[tuple[int, str]]:
+        with self._conn() as con:
+            rows = con.execute("SELECT id, display FROM employees ORDER BY last_name, first_name").fetchall()
+            return [(r[0], r[1]) for r in rows]
 
     # Spectacles
     def list_spectacles(self) -> List[str]:
@@ -211,6 +324,50 @@ class DB:
             con.execute("UPDATE employees SET tg_id=? WHERE id=?", (tg_id, employee_id))
             con.commit()
 
+    def get_employee_by_tg(self, tg_id: int | str):
+        with self._conn() as con:
+            row = con.execute("SELECT id, display FROM employees WHERE tg_id=?", (str(tg_id),)).fetchone()
+            return row  # (id, display) or None
+
+    def add_busy_dates(self, employee_id: int, dates: list[str]) -> list[str]:
+        added = []
+        with self._conn() as con:
+            for ds in dates:
+                cur = con.execute(
+                    "INSERT OR IGNORE INTO employee_busy(employee_id, date_str) VALUES(?, ?)",
+                    (employee_id, ds),
+                )
+                if cur.rowcount:
+                    added.append(ds)
+            con.commit()
+        return added
+
+    def list_busy_dates(self, employee_id: int) -> list[str]:
+        with self._conn() as con:
+            rows = con.execute(
+                "SELECT date_str FROM employee_busy WHERE employee_id=? ORDER BY date_str",
+                (employee_id,),
+            ).fetchall()
+            return [r[0] for r in rows]
+
+    def remove_busy_dates(self, employee_id: int, dates: list[str]) -> list[str]:
+        removed = []
+        with self._conn() as con:
+            for ds in dates:
+                cur = con.execute(
+                    "DELETE FROM employee_busy WHERE employee_id=? AND date_str=?",
+                    (employee_id, ds),
+                )
+                if cur.rowcount:
+                    removed.append(ds)
+            con.commit()
+        return removed
+
+    def clear_busy_dates(self, employee_id: int) -> None:
+        with self._conn() as con:
+            con.execute("DELETE FROM employee_busy WHERE employee_id=?", (employee_id,))
+            con.commit()
+
 DBI = DB(DB_PATH)
 
 # ====== FSM ======
@@ -227,8 +384,11 @@ class AddEmployee(StatesGroup):
 class EditEmployeeTg(StatesGroup):
     waiting_for_tg = State()
 
+import calendar
+
 # ====== UI helpers ======
-def get_employees_kb(selected=None):
+
+def get_employees_kb(selected: list[str] | None = None):
     if selected is None:
         selected = []
     btns = []
@@ -244,6 +404,49 @@ def get_spectacles_inline_kb():
         builder.button(text=name, callback_data=f"title:{name}")
     builder.button(text="➕ Добавить", callback_data="add_spectacle")
     builder.adjust(1)
+    return builder.as_markup()
+
+RU_MONTHS = [
+    "Январь","Февраль","Март","Апрель","Май","Июнь",
+    "Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь",
+]
+def _is_admin(user_id: int) -> bool:
+    return bool(ADMIN_ID) and str(user_id) == str(ADMIN_ID)
+
+def can_show_user_busy_buttons(user_id: int, today: date | None = None) -> bool:
+    d = today or date.today()
+    # обычным пользователям inline/reply-кнопки показываем до 25-го, админу — всегда
+    return _is_admin(user_id) or d.day < 25
+
+def get_user_busy_reply_kb(user_id: int) -> ReplyKeyboardMarkup:
+    # Базовый ряд главного меню всегда остаётся наверху
+    base_rows = [[KeyboardButton(text="Спектакли"), KeyboardButton(text="Сотрудники")]]
+
+    # Если кнопки занятости скрыты для пользователя — показываем только главное меню
+    if not can_show_user_busy_buttons(user_id):
+        return ReplyKeyboardMarkup(keyboard=base_rows, resize_keyboard=True)
+
+    next_m, next_y, mname = next_month_and_year()
+    is_admin = _is_admin(user_id)
+
+    submitted = False
+    row = DBI.get_employee_by_tg(user_id)
+    if row:
+        submitted = DBI.has_submitted(row[0], next_y, next_m)
+
+    if is_admin:
+        busy_rows = [[KeyboardButton(text=f"Подать даты за {mname}")],
+                     [KeyboardButton(text="Посмотреть свои даты")]]
+    else:
+        busy_rows = [[KeyboardButton(text="Посмотреть свои даты")]] if submitted else [[KeyboardButton(text=f"Подать даты за {mname}")]]
+
+    # Главное меню + блок занятости снизу
+    return ReplyKeyboardMarkup(keyboard=base_rows + busy_rows, resize_keyboard=True)
+def get_user_busy_manage_kb(show_add: bool = True, user_id: int | None = None):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="➕ Добавить", callback_data="busy:add")
+    builder.button(text="➖ Убрать", callback_data="busy:remove")
+    builder.adjust(2)
     return builder.as_markup()
 
 def get_employees_inline_kb():
@@ -271,6 +474,248 @@ def get_edit_employees_inline_kb(sid: int):
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Выберите раздел:", reply_markup=MAIN_KB)
+    if can_show_user_busy_buttons(message.from_user.id):
+        await message.answer("Даты занятости:", reply_markup=get_user_busy_reply_kb(message.from_user.id))
+        ikb = get_user_busy_inline(message.from_user.id)
+        if getattr(ikb, 'inline_keyboard', None):
+            await message.answer("Быстрые действия:", reply_markup=ikb)
+# ========== BUSY FLOW ========== #
+# Month utils
+def next_month_and_year(today: date = None):
+    if today is None:
+        today = date.today()
+    m = today.month + 1
+    y = today.year
+    if m > 12:
+        m = 1
+        y += 1
+    mname = RU_MONTHS[m-1]
+    return m, y, mname
+
+def format_busy_dates_for_month(days: list[int], month: int, year: int) -> list[str]:
+    return [f"{year:04d}-{month:02d}-{d:02d}" for d in days]
+
+
+import calendar
+
+def parse_days_for_month(text: str, month: int, year: int) -> list[int]:
+    s = (text or "").replace(" ", "").strip()
+    if not s:
+        return []
+    max_day = calendar.monthrange(year, month)[1]
+    days: set[int] = set()
+    for part in s.split(","):
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            try:
+                a_i = int(a); b_i = int(b)
+            except ValueError:
+                continue
+            if a_i > b_i:
+                a_i, b_i = b_i, a_i
+            for d in range(a_i, b_i + 1):
+                if 1 <= d <= max_day:
+                    days.add(d)
+        else:
+            try:
+                v = int(part)
+                if 1 <= v <= max_day:
+                    days.add(v)
+            except ValueError:
+                continue
+    return sorted(days)
+
+async def ensure_known_user_or_report_message(message: Message) -> int | None:
+    row = DBI.get_employee_by_tg(message.from_user.id)
+    if row:
+        return row[0]
+    if ADMIN_ID:
+        u = message.from_user
+        info = (f"Неизвестный пользователь\nID: {u.id}\nИмя: {u.first_name}\nФамилия: {u.last_name}\nUsername: @{u.username if u.username else '-'}")
+        kb = InlineKeyboardBuilder()
+        for eid, disp in DBI.list_employees_full():
+            kb.button(text=disp, callback_data=f"maptg:{eid}:{u.id}")
+        kb.adjust(1)
+        try:
+            await message.bot.send_message(ADMIN_ID, info, reply_markup=kb.as_markup())
+        except Exception:
+            pass
+    await message.answer("Неизвестный пользователь. Администратор сопоставит ваш аккаунт.")
+    return None
+
+# Dummy busy flow handlers for demonstration; replace with your real implementations.
+class BusyInput(StatesGroup):
+    waiting_for_add_user = State()
+    waiting_for_remove_user = State()
+
+def get_user_busy_inline(user_id: int):
+    if not can_show_user_busy_buttons(user_id):
+        return InlineKeyboardBuilder().as_markup()
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Подать даты", callback_data="busy:submit")
+    builder.button(text="Посмотреть даты", callback_data="busy:view")
+    builder.adjust(1)
+    return builder.as_markup()
+
+async def busy_submit_text(message: Message, state: FSMContext):
+    eid = await ensure_known_user_or_report_message(message)
+    if eid is None:
+        return
+    _, _, mname = next_month_and_year()
+    await state.set_state(BusyInput.waiting_for_add_user)
+    await message.answer(f"Введите числа за {mname} через запятую или через дефис для диапазона (пример: 1,3,5-7)")
+
+async def busy_view_text(message: Message, state: FSMContext):
+    eid = await ensure_known_user_or_report_message(message)
+    if eid is None:
+        return
+    dates = DBI.list_busy_dates(eid)
+    txt = ", ".join(dates) if dates else "пусто"
+    await message.answer(f"Ваши даты: {txt}", reply_markup=get_user_busy_manage_kb(user_id=message.from_user.id))
+
+async def _notify_admin_busy_change(bot: Bot, employee_id: int, action: str, items: list[str], user: Message | CallbackQuery):
+    if not ADMIN_ID:
+        return
+    with DBI._conn() as con:
+        row = con.execute("SELECT display FROM employees WHERE id=?", (employee_id,)).fetchone()
+        disp = row[0] if row else str(employee_id)
+    who = user.from_user
+    payload = ", ".join(items) if items else "—"
+    text = f"[BUSY] {action} — {disp}: {payload}\nby: {who.id} @{who.username if who.username else '-'}"
+    try:
+        await bot.send_message(ADMIN_ID, text)
+    except Exception:
+        pass
+
+async def handle_busy_add_text(message: Message, state: FSMContext):
+    eid = await ensure_known_user_or_report_message(message)
+    if eid is None:
+        await state.clear(); return
+    month, year, _ = next_month_and_year()
+    days = parse_days_for_month(message.text, month, year)
+    dates = format_busy_dates_for_month(days, month, year)
+    added = DBI.add_busy_dates(eid, dates)
+    if added:
+        DBI.set_submitted(eid, year, month)
+        DBI.log_busy(eid, 'add', ','.join(added))
+        await _notify_admin_busy_change(message.bot, eid, 'add', added, message)
+    await message.answer(f"Добавлено: {', '.join(added) if added else 'ничего нового'}",
+                         reply_markup=get_user_busy_reply_kb(message.from_user.id))
+    await state.clear()
+
+async def handle_busy_remove_text(message: Message, state: FSMContext):
+    eid = await ensure_known_user_or_report_message(message)
+    if eid is None:
+        await state.clear(); return
+    raw = (message.text or '').strip().lower()
+    if raw in {"очистить", "очистка", "clear"}:
+        DBI.clear_busy_dates(eid)
+        DBI.log_busy(eid, 'clear', '-')
+        await _notify_admin_busy_change(message.bot, eid, 'clear', [], message)
+        await message.answer("Все даты удалены.", reply_markup=get_user_busy_reply_kb(message.from_user.id))
+        await state.clear(); return
+    month, year, _ = next_month_and_year()
+    days = parse_days_for_month(raw, month, year)
+    dates = format_busy_dates_for_month(days, month, year)
+    removed = DBI.remove_busy_dates(eid, dates)
+    if removed:
+        DBI.log_busy(eid, 'remove', ','.join(removed))
+        await _notify_admin_busy_change(message.bot, eid, 'remove', removed, message)
+    await message.answer(f"Удалено: {', '.join(removed) if removed else 'ничего не удалено'}",
+                         reply_markup=get_user_busy_reply_kb(message.from_user.id))
+    await state.clear()
+
+async def admin_busy_panel(message: Message):
+    if not ADMIN_ID or str(message.from_user.id) != str(ADMIN_ID):
+        return
+    m, y, mname = next_month_and_year()
+    submitted = []
+    missing = []
+    for eid, disp in DBI.list_all_employees():
+        if DBI.has_submitted(eid, y, m):
+            submitted.append(disp)
+        else:
+            missing.append(disp)
+    text = [f"Статус подачи за {mname}:"]
+    text.append("\nПодали (" + str(len(submitted)) + "): " + (", ".join(submitted) if submitted else "—"))
+    text.append("Не подали (" + str(len(missing)) + "): " + (", ".join(missing) if missing else "—"))
+    await message.answer("\n".join(text))
+
+async def admin_map_tg(callback: CallbackQuery):
+    if not ADMIN_ID or str(callback.from_user.id) != str(ADMIN_ID):
+        await callback.answer("Только для админа", show_alert=True); return
+    try:
+        _, eid_s, tg_s = (callback.data or '').split(":", 2)
+        eid = int(eid_s)
+        tg_id = tg_s
+    except Exception:
+        await callback.answer("Ошибка данных", show_alert=True); return
+    DBI.set_employee_tg_by_id(eid, tg_id)
+    await callback.answer("Сопоставлено ✅", show_alert=False)
+
+async def busy_submit(callback: CallbackQuery, state: FSMContext):
+    row = DBI.get_employee_by_tg(callback.from_user.id)
+    if not row:
+        if ADMIN_ID:
+            u = callback.from_user
+            info = (f"Неизвестный пользователь\nID: {u.id}\nИмя: {u.first_name}\nФамилия: {u.last_name}\nUsername: @{u.username if u.username else '-'}")
+            kb = InlineKeyboardBuilder()
+            for eid, disp in DBI.list_employees_full():
+                kb.button(text=disp, callback_data=f"maptg:{eid}:{u.id}")
+            kb.adjust(1)
+            try:
+                await callback.bot.send_message(ADMIN_ID, info, reply_markup=kb.as_markup())
+            except Exception:
+                pass
+        await callback.message.answer("Неизвестный пользователь. Администратор сопоставит ваш аккаунт.")
+        await callback.answer(); return
+    _, _, mname = next_month_and_year()
+    await state.set_state(BusyInput.waiting_for_add_user)
+    await callback.message.answer(f"Введите числа за {mname} через запятую или через дефис для диапазона (пример: 1,3,5-7)")
+    await callback.answer()
+
+async def busy_view(callback: CallbackQuery, state: FSMContext):
+    row = DBI.get_employee_by_tg(callback.from_user.id)
+    if not row:
+        if ADMIN_ID:
+            u = callback.from_user
+            info = (f"Неизвестный пользователь\nID: {u.id}\nИмя: {u.first_name}\nФамилия: {u.last_name}\nUsername: @{u.username if u.username else '-'}")
+            kb = InlineKeyboardBuilder()
+            for eid, disp in DBI.list_employees_full():
+                kb.button(text=disp, callback_data=f"maptg:{eid}:{u.id}")
+            kb.adjust(1)
+            try:
+                await callback.bot.send_message(ADMIN_ID, info, reply_markup=kb.as_markup())
+            except Exception:
+                pass
+        await callback.message.answer("Неизвестный пользователь. Администратор сопоставит ваш аккаунт.")
+        await callback.answer(); return
+    eid = row[0]
+    dates = DBI.list_busy_dates(eid)
+    txt = ", ".join(dates) if dates else "пусто"
+    await callback.message.answer(f"Ваши даты: {txt}", reply_markup=get_user_busy_manage_kb(user_id=callback.from_user.id))
+    await callback.answer()
+
+async def busy_add(callback: CallbackQuery, state: FSMContext):
+    row = DBI.get_employee_by_tg(callback.from_user.id)
+    if not row:
+        await callback.message.answer("Неизвестный пользователь. Администратор сопоставит ваш аккаунт.")
+        await callback.answer(); return
+    _, _, mname = next_month_and_year()
+    await state.set_state(BusyInput.waiting_for_add_user)
+    await callback.message.answer(f"Введите числа за {mname} (пример: 2,4,10-12)")
+    await callback.answer()
+
+async def busy_remove(callback: CallbackQuery, state: FSMContext):
+    row = DBI.get_employee_by_tg(callback.from_user.id)
+    if not row:
+        await callback.message.answer("Неизвестный пользователь. Администратор сопоставит ваш аккаунт.")
+        await callback.answer(); return
+    await state.set_state(BusyInput.waiting_for_remove_user)
+    await callback.message.answer("Введите число для удаления или напишите 'очистить' чтобы удалить все даты")
+    await callback.answer()
 
 async def handle_spectacles(message: Message, state: FSMContext):
     txt = "Выберите спектакль или добавьте новый:" if DBI.list_spectacles() else "Список пуст. Нажмите \"➕ Добавить\"."
@@ -522,6 +967,27 @@ async def add_employee_tg(message: Message, state: FSMContext):
     await message.answer(f"Сотрудник сохранён: {ln} {fn}", reply_markup=MAIN_KB)
 
 # ====== Entrypoint ======
+async def monthly_broadcast_task(bot: Bot):
+    # runs forever; checks hourly
+    while True:
+        try:
+            today = date.today()
+            next_m, next_y, mname = next_month_and_year(today)
+            DBI.ensure_window(next_y, next_m)
+            wnd = DBI.get_window(next_y, next_m)
+            sent = wnd[3] if wnd else 0
+            if today.day == 1 and not sent:
+                # send to all with tg_id
+                for eid, disp, tg in DBI.list_employees_with_tg():
+                    try:
+                        await bot.send_message(tg, f"{disp}, пришлите занятые даты за {mname}", reply_markup=get_user_busy_reply_kb(tg))
+                    except Exception:
+                        continue
+                DBI.mark_broadcast_sent(next_y, next_m)
+        except Exception:
+            pass
+        await asyncio.sleep(3600)
+
 async def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("Не указан BOT_TOKEN (добавьте его в .env)")
@@ -552,6 +1018,21 @@ async def main() -> None:
 
     # EditEmployeeTg FSM
     dp.message.register(emp_tg_set_value, EditEmployeeTg.waiting_for_tg)
+
+    # Register admin panel and busy flow
+    dp.message.register(admin_busy_panel, F.text.lower() == "busy_admin")
+    dp.callback_query.register(admin_map_tg, F.data.startswith('maptg:'))
+    dp.callback_query.register(busy_submit, F.data == 'busy:submit')
+    dp.callback_query.register(busy_view,   F.data == 'busy:view')
+    dp.callback_query.register(busy_add,    F.data == 'busy:add')
+    dp.callback_query.register(busy_remove, F.data == 'busy:remove')
+    dp.message.register(handle_busy_add_text,    BusyInput.waiting_for_add_user)
+    dp.message.register(handle_busy_remove_text, BusyInput.waiting_for_remove_user)
+    dp.message.register(busy_submit_text, F.text.regexp(r"^Подать даты за "))
+    dp.message.register(busy_view_text,   F.text.lower() == "посмотреть свои даты")
+
+    # background monthly broadcast
+    asyncio.create_task(monthly_broadcast_task(bot))
 
     print("Bot is running… Press Ctrl+C to stop.")
     await dp.start_polling(bot)
