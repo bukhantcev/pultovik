@@ -436,12 +436,13 @@ def can_show_user_busy_buttons(user_id: int, today: date | None = None) -> bool:
     return _is_admin(user_id) or d.day < 25
 
 def get_user_busy_reply_kb(user_id: int) -> ReplyKeyboardMarkup:
-    # Базовый ряд главного меню всегда остаётся наверху
-    base_rows = [[KeyboardButton(text="Спектакли"), KeyboardButton(text="Сотрудники")]]
+    # Главные кнопки доступны только админу
+    base_rows = [[KeyboardButton(text="Спектакли"), KeyboardButton(text="Сотрудники")]] if _is_admin(user_id) else []
 
-    # Если кнопки занятости скрыты для пользователя — показываем только главное меню
+    # Если кнопки занятости скрыты для пользователя — показываем только главное меню (если оно есть)
     if not can_show_user_busy_buttons(user_id):
-        return ReplyKeyboardMarkup(keyboard=base_rows, resize_keyboard=True)
+        # если не админ, base_rows может быть пустым, тогда вернём пустую либо базовую клавиатуру
+        return ReplyKeyboardMarkup(keyboard=base_rows or [], resize_keyboard=True)
 
     next_m, next_y, mname = next_month_and_year()
 
@@ -732,14 +733,23 @@ async def busy_remove(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 async def handle_spectacles(message: Message, state: FSMContext):
+    if not _is_admin(message.from_user.id):
+        await message.answer("Только для админа")
+        return
     txt = "Выберите спектакль или добавьте новый:" if DBI.list_spectacles() else "Список пуст. Нажмите \"➕ Добавить\"."
     await message.answer(txt, reply_markup=get_spectacles_inline_kb())
 
 async def handle_workers(message: Message, state: FSMContext):
+    if not _is_admin(message.from_user.id):
+        await message.answer("Только для админа")
+        return
     txt = "Выберите сотрудника или добавьте нового:" if DBI.list_employees() else "Список пуст. Нажмите \"➕ Добавить\"."
     await message.answer(txt, reply_markup=get_employees_inline_kb())
 
 async def spectacles_menu_router(callback: CallbackQuery, state: FSMContext):
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Только для админа", show_alert=True)
+        return
     data = callback.data or ""
     if data == "add_spectacle":
         await state.set_state(AddSpectacle.waiting_for_name)
@@ -768,6 +778,9 @@ async def spectacles_menu_router(callback: CallbackQuery, state: FSMContext):
         return
 
 async def employees_menu_router(callback: CallbackQuery, state: FSMContext):
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Только для админа", show_alert=True)
+        return
     data = callback.data or ""
     if data == "emp:add":
         await state.set_state(AddEmployee.waiting_for_last_name)
@@ -796,6 +809,9 @@ async def employees_menu_router(callback: CallbackQuery, state: FSMContext):
 
 # === Employee Delete and Edit TG ID handlers ===
 async def emp_del_ask(callback: CallbackQuery, state: FSMContext):
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Только для админа", show_alert=True)
+        return
     data = callback.data or ""
     # emp:del:ask:<eid>
     try:
@@ -811,6 +827,9 @@ async def emp_del_ask(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 async def emp_del_yes(callback: CallbackQuery, state: FSMContext):
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Только для админа", show_alert=True)
+        return
     data = callback.data or ""
     # emp:del:yes:<eid>
     try:
@@ -823,9 +842,15 @@ async def emp_del_yes(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 async def emp_del_no(callback: CallbackQuery, state: FSMContext):
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Только для админа", show_alert=True)
+        return
     await callback.answer("Отменено")
 
 async def emp_tg_start(callback: CallbackQuery, state: FSMContext):
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Только для админа", show_alert=True)
+        return
     data = callback.data or ""
     # emp:tg:start:<eid>
     try:
@@ -847,20 +872,23 @@ async def emp_tg_set_value(message: Message, state: FSMContext):
         return
     raw = (message.text or '').strip()
     if raw.lower() == 'пропустить':
-        await message.answer("Изменение отменено.", reply_markup=MAIN_KB)
+        await message.answer("Изменение отменено.", reply_markup=get_user_busy_reply_kb(message.from_user.id))
         await state.clear()
         return
     if raw.lower() in {'очистить', 'удалить', '-'}:
         DBI.set_employee_tg_by_id(eid, None)
-        await message.answer("Telegram ID очищен ✅", reply_markup=MAIN_KB)
+        await message.answer("Telegram ID очищен ✅", reply_markup=get_user_busy_reply_kb(message.from_user.id))
         await state.clear()
         return
     # save new TG id
     DBI.set_employee_tg_by_id(eid, raw)
-    await message.answer("Telegram ID обновлён ✅", reply_markup=MAIN_KB)
+    await message.answer("Telegram ID обновлён ✅", reply_markup=get_user_busy_reply_kb(message.from_user.id))
     await state.clear()
 
 async def edit_employees_start(callback: CallbackQuery, state: FSMContext):
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Только для админа", show_alert=True)
+        return
     data = callback.data or ""
     # editstart:<sid>
     try:
@@ -872,6 +900,9 @@ async def edit_employees_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 async def edit_employees_toggle(callback: CallbackQuery, state: FSMContext):
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Только для админа", show_alert=True)
+        return
     data = callback.data or ""
     # edittoggle:<sid>:<eid>
     try:
@@ -886,6 +917,9 @@ async def edit_employees_toggle(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 async def edit_employees_done(callback: CallbackQuery, state: FSMContext):
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Только для админа", show_alert=True)
+        return
     data = callback.data or ""
     # editdone:<sid>
     try:
@@ -927,14 +961,14 @@ async def add_spectacle_employees(message: Message, state: FSMContext):
     selected = data.get("employees", [])
     txt = message.text.strip()
     if not DBI.list_employees():
-        await message.answer("Сначала добавьте сотрудников в разделе ‘Сотрудники’.", reply_markup=MAIN_KB)
+        await message.answer("Сначала добавьте сотрудников в разделе ‘Сотрудники’.", reply_markup=get_user_busy_reply_kb(message.from_user.id))
         await state.clear()
         return
     if txt == "✅ Готово":
         name = data.get("name")
         DBI.set_spectacle_employees(name, selected)
         await state.clear()
-        await message.answer(f"Сохранено!\nСпектакль «{name}» добавлен.", reply_markup=MAIN_KB)
+        await message.answer(f"Сохранено!\nСпектакль «{name}» добавлен.", reply_markup=get_user_busy_reply_kb(message.from_user.id))
         return
     # Remove checkmark if present
     emp = txt.replace("✅ ", "")
@@ -978,7 +1012,7 @@ async def add_employee_tg(message: Message, state: FSMContext):
     # save
     DBI.upsert_employee(ln, fn, tg_id)
     await state.clear()
-    await message.answer(f"Сотрудник сохранён: {ln} {fn}", reply_markup=MAIN_KB)
+    await message.answer(f"Сотрудник сохранён: {ln} {fn}", reply_markup=get_user_busy_reply_kb(message.from_user.id))
 
 # ====== Entrypoint ======
 async def monthly_broadcast_task(bot: Bot):
