@@ -187,6 +187,14 @@ class DB:
             )
             con.commit()
 
+    def unset_submitted(self, employee_id: int, year: int, month: int):
+        with self._conn() as con:
+            con.execute(
+                "DELETE FROM user_submissions WHERE employee_id=? AND year=? AND month=?",
+                (employee_id, year, month),
+            )
+            con.commit()
+
     def has_submitted(self, employee_id: int, year: int, month: int) -> bool:
         with self._conn() as con:
             row = con.execute(
@@ -368,6 +376,15 @@ class DB:
             con.execute("DELETE FROM employee_busy WHERE employee_id=?", (employee_id,))
             con.commit()
 
+    def count_busy_for_month(self, employee_id: int, year: int, month: int) -> int:
+        prefix = f"{year:04d}-{month:02d}-"
+        with self._conn() as con:
+            row = con.execute(
+                "SELECT COUNT(*) FROM employee_busy WHERE employee_id=? AND date_str LIKE ?",
+                (employee_id, prefix + '%'),
+            ).fetchone()
+            return int(row[0] if row and row[0] is not None else 0)
+
 DBI = DB(DB_PATH)
 
 # ====== FSM ======
@@ -427,20 +444,15 @@ def get_user_busy_reply_kb(user_id: int) -> ReplyKeyboardMarkup:
         return ReplyKeyboardMarkup(keyboard=base_rows, resize_keyboard=True)
 
     next_m, next_y, mname = next_month_and_year()
-    is_admin = _is_admin(user_id)
 
-    submitted = False
+    has_busy = False
     row = DBI.get_employee_by_tg(user_id)
     if row:
-        submitted = DBI.has_submitted(row[0], next_y, next_m)
+        has_busy = DBI.count_busy_for_month(row[0], next_y, next_m) > 0
 
-    if is_admin:
-        busy_rows = [[KeyboardButton(text=f"Подать даты за {mname}")],
-                     [KeyboardButton(text="Посмотреть свои даты")]]
-    else:
-        busy_rows = [[KeyboardButton(text="Посмотреть свои даты")]] if submitted else [[KeyboardButton(text=f"Подать даты за {mname}")]]
+    # Показываем ровно одну кнопку: либо "Подать даты...", либо "Посмотреть свои даты"
+    busy_rows = [[KeyboardButton(text="Посмотреть свои даты")]] if has_busy else [[KeyboardButton(text=f"Подать даты за {mname}")]]
 
-    # Главное меню + блок занятости снизу
     return ReplyKeyboardMarkup(keyboard=base_rows + busy_rows, resize_keyboard=True)
 def get_user_busy_manage_kb(show_add: bool = True, user_id: int | None = None):
     builder = InlineKeyboardBuilder()
@@ -473,12 +485,8 @@ def get_edit_employees_inline_kb(sid: int):
 # ====== Handlers ======
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("Выберите раздел:", reply_markup=MAIN_KB)
-    if can_show_user_busy_buttons(message.from_user.id):
-        await message.answer("Даты занятости:", reply_markup=get_user_busy_reply_kb(message.from_user.id))
-        ikb = get_user_busy_inline(message.from_user.id)
-        if getattr(ikb, 'inline_keyboard', None):
-            await message.answer("Быстрые действия:", reply_markup=ikb)
+    await message.answer("Выберите раздел:", reply_markup=get_user_busy_reply_kb(message.from_user.id))
+
 # ========== BUSY FLOW ========== #
 # Month utils
 def next_month_and_year(today: date = None):
@@ -609,20 +617,26 @@ async def handle_busy_remove_text(message: Message, state: FSMContext):
     eid = await ensure_known_user_or_report_message(message)
     if eid is None:
         await state.clear(); return
+    month, year, _ = next_month_and_year()
     raw = (message.text or '').strip().lower()
     if raw in {"очистить", "очистка", "clear"}:
         DBI.clear_busy_dates(eid)
         DBI.log_busy(eid, 'clear', '-')
+        # Сбросить факт подачи за этот месяц
+        DBI.unset_submitted(eid, year, month)
         await _notify_admin_busy_change(message.bot, eid, 'clear', [], message)
         await message.answer("Все даты удалены.", reply_markup=get_user_busy_reply_kb(message.from_user.id))
         await state.clear(); return
-    month, year, _ = next_month_and_year()
     days = parse_days_for_month(raw, month, year)
     dates = format_busy_dates_for_month(days, month, year)
     removed = DBI.remove_busy_dates(eid, dates)
     if removed:
         DBI.log_busy(eid, 'remove', ','.join(removed))
         await _notify_admin_busy_change(message.bot, eid, 'remove', removed, message)
+    # Если за следующий месяц больше не осталось дат — снять флаг подачи
+    remaining = [d for d in DBI.list_busy_dates(eid) if d.startswith(f"{year:04d}-{month:02d}-")]
+    if not remaining:
+        DBI.unset_submitted(eid, year, month)
     await message.answer(f"Удалено: {', '.join(removed) if removed else 'ничего не удалено'}",
                          reply_markup=get_user_busy_reply_kb(message.from_user.id))
     await state.clear()
