@@ -559,6 +559,10 @@ class BusyInput(StatesGroup):
     waiting_for_add_user = State()
     waiting_for_remove_user = State()
 
+class AdminBusyInput(StatesGroup):
+    waiting_for_add = State()
+    waiting_for_remove = State()
+
 def get_user_busy_inline(user_id: int):
     if not can_show_user_busy_buttons(user_id):
         return InlineKeyboardBuilder().as_markup()
@@ -797,6 +801,7 @@ async def employees_menu_router(callback: CallbackQuery, state: FSMContext):
             kb = InlineKeyboardBuilder()
             kb.button(text="✏️ Изменить TG ID", callback_data=f"emp:tg:start:{eid}")
             kb.button(text="🗑 Удалить", callback_data=f"emp:del:ask:{eid}")
+            kb.button(text="📅 Показать даты", callback_data=f"emp:busy:view:{eid}")
             kb.adjust(1)
             await callback.message.answer(
                 f"Сотрудник:\nФамилия: {ln}\nИмя: {fn}\nTelegram ID: {tg_text}",
@@ -884,6 +889,46 @@ async def emp_tg_set_value(message: Message, state: FSMContext):
     DBI.set_employee_tg_by_id(eid, raw)
     await message.answer("Telegram ID обновлён ✅", reply_markup=get_user_busy_reply_kb(message.from_user.id))
     await state.clear()
+
+async def emp_busy_view(callback: CallbackQuery, state: FSMContext):
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Только для админа", show_alert=True)
+        return
+    data = callback.data or ""
+    try:
+        eid = int(data.split(":", 3)[3])
+    except Exception:
+        await callback.answer("Ошибка", show_alert=True)
+        return
+    dates = DBI.list_busy_dates(eid)
+    txt = ", ".join(dates) if dates else "пусто"
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Добавить", callback_data=f"empbusy:add:{eid}")
+    kb.button(text="➖ Убрать", callback_data=f"empbusy:remove:{eid}")
+    kb.adjust(2)
+    await callback.message.answer(f"Даты сотрудника: {txt}", reply_markup=kb.as_markup())
+    await callback.answer()
+
+async def emp_busy_add_start(callback: CallbackQuery, state: FSMContext):
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Только для админа", show_alert=True)
+        return
+    eid = int(callback.data.split(":", 2)[2])
+    await state.update_data(admin_target_eid=eid)
+    _, _, mname = next_month_and_year()
+    await state.set_state(AdminBusyInput.waiting_for_add)
+    await callback.message.answer(f"Введите числа за {mname} (пример: 2,4,10-12)")
+    await callback.answer()
+
+async def emp_busy_remove_start(callback: CallbackQuery, state: FSMContext):
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Только для админа", show_alert=True)
+        return
+    eid = int(callback.data.split(":", 2)[2])
+    await state.update_data(admin_target_eid=eid)
+    await state.set_state(AdminBusyInput.waiting_for_remove)
+    await callback.message.answer("Введите число/диапазон для удаления или 'очистить' чтобы удалить все даты")
+    await callback.answer()
 
 async def edit_employees_start(callback: CallbackQuery, state: FSMContext):
     if not _is_admin(callback.from_user.id):
@@ -1013,7 +1058,56 @@ async def add_employee_tg(message: Message, state: FSMContext):
     DBI.upsert_employee(ln, fn, tg_id)
     await state.clear()
     await message.answer(f"Сотрудник сохранён: {ln} {fn}", reply_markup=get_user_busy_reply_kb(message.from_user.id))
+async def admin_handle_busy_add_text(message: Message, state: FSMContext):
+    if not _is_admin(message.from_user.id):
+        await message.answer("Только для админа")
+        await state.clear(); return
+    data = await state.get_data()
+    eid = data.get('admin_target_eid')
+    if not eid:
+        await message.answer("Нет выбранного сотрудника.")
+        await state.clear(); return
+    month, year, _ = next_month_and_year()
+    days = parse_days_for_month(message.text, month, year)
+    dates = format_busy_dates_for_month(days, month, year)
+    added = DBI.add_busy_dates(eid, dates)
+    if added:
+        DBI.set_submitted(eid, year, month)
+        DBI.log_busy(eid, 'add', ','.join(added))
+        await _notify_admin_busy_change(message.bot, eid, 'add', added, message)
+    await message.answer(f"Добавлено: {', '.join(added) if added else 'ничего нового'}")
+    await state.clear()
 
+
+async def admin_handle_busy_remove_text(message: Message, state: FSMContext):
+    if not _is_admin(message.from_user.id):
+        await message.answer("Только для админа")
+        await state.clear(); return
+    data = await state.get_data()
+    eid = data.get('admin_target_eid')
+    if not eid:
+        await message.answer("Нет выбранного сотрудника.")
+        await state.clear(); return
+    month, year, _ = next_month_and_year()
+    raw = (message.text or '').strip().lower()
+    if raw in {"очистить", "очистка", "clear"}:
+        DBI.clear_busy_dates(eid)
+        DBI.log_busy(eid, 'clear', '-')
+        DBI.unset_submitted(eid, year, month)
+        await _notify_admin_busy_change(message.bot, eid, 'clear', [], message)
+        await message.answer("Все даты удалены.")
+        await state.clear(); return
+    days = parse_days_for_month(raw, month, year)
+    dates = format_busy_dates_for_month(days, month, year)
+    removed = DBI.remove_busy_dates(eid, dates)
+    if removed:
+        DBI.log_busy(eid, 'remove', ','.join(removed))
+        await _notify_admin_busy_change(message.bot, eid, 'remove', removed, message)
+    remaining = [d for d in DBI.list_busy_dates(eid) if d.startswith(f"{year:04d}-{month:02d}-")]
+    if not remaining:
+        DBI.unset_submitted(eid, year, month)
+    await message.answer(f"Удалено: {', '.join(removed) if removed else 'ничего не удалено'}")
+    await state.clear()
 # ====== Entrypoint ======
 async def monthly_broadcast_task(bot: Bot):
     # runs forever; checks hourly
@@ -1055,7 +1149,7 @@ async def main() -> None:
     dp.callback_query.register(emp_del_ask,  F.data.startswith('emp:del:ask:'))
     dp.callback_query.register(emp_del_no,   F.data == 'emp:del:no')
     dp.callback_query.register(emp_tg_start, F.data.startswith('emp:tg:start:'))
-    dp.callback_query.register(employees_menu_router,  F.data.startswith('emp:'))
+    dp.callback_query.register(employees_menu_router,  (F.data == 'emp:add') | F.data.startswith('emp:show:'))
     # Состояния FSM
     dp.message.register(add_spectacle_name, AddSpectacle.waiting_for_name)
     dp.message.register(add_spectacle_employees, AddSpectacle.waiting_for_employees)
@@ -1078,6 +1172,12 @@ async def main() -> None:
     dp.message.register(handle_busy_remove_text, BusyInput.waiting_for_remove_user)
     dp.message.register(busy_submit_text, F.text.regexp(r"^Подать даты за "))
     dp.message.register(busy_view_text,   F.text.lower() == "посмотреть свои даты")
+    dp.callback_query.register(emp_busy_view,         F.data.startswith('emp:busy:view:'))
+    dp.callback_query.register(emp_busy_add_start,    F.data.startswith('empbusy:add:'))
+    dp.callback_query.register(emp_busy_remove_start, F.data.startswith('empbusy:remove:'))
+
+    dp.message.register(admin_handle_busy_add_text,    AdminBusyInput.waiting_for_add)
+    dp.message.register(admin_handle_busy_remove_text, AdminBusyInput.waiting_for_remove)
 
     # background monthly broadcast
     asyncio.create_task(monthly_broadcast_task(bot))
