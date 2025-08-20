@@ -11,6 +11,9 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from dotenv import load_dotenv
 from datetime import datetime, date, UTC
+import tempfile
+from pathlib import Path
+import pandas as pd
 
 # ====== Config ======
 load_dotenv()
@@ -104,6 +107,21 @@ class DB:
                     submitted_at TEXT NOT NULL,
                     UNIQUE(employee_id, year, month),
                     FOREIGN KEY(employee_id) REFERENCES employees(id) ON DELETE CASCADE
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT NOT NULL,
+                    type TEXT,
+                    title TEXT,
+                    time TEXT,
+                    location TEXT,
+                    city TEXT,
+                    employee TEXT,
+                    info TEXT
                 )
                 """
             )
@@ -385,6 +403,25 @@ class DB:
             ).fetchone()
             return int(row[0] if row and row[0] is not None else 0)
 
+    def delete_events_for_month(self, year: int, month: int):
+        prefix = f"{year:04d}-{month:02d}-"
+        with self._conn() as con:
+            con.execute("DELETE FROM events WHERE date LIKE ?", (prefix + '%',))
+            con.commit()
+
+    def insert_events(self, rows: list[dict]):
+        if not rows:
+            return
+        with self._conn() as con:
+            con.executemany(
+                """
+                INSERT INTO events(date, type, title, time, location, city, employee, info)
+                VALUES(:date, :type, :title, :time, :location, :city, :employee, :info)
+                """,
+                rows,
+            )
+            con.commit()
+
 DBI = DB(DB_PATH)
 
 # ====== FSM ======
@@ -483,6 +520,22 @@ def get_edit_employees_inline_kb(sid: int):
     builder.adjust(1)
     return builder.as_markup()
 
+async def _send_next_unknown_for_assignment(message_or_cb_msg, state: FSMContext):
+    data = await state.get_data()
+    sids: list[int] = data.get('assign_unknown_sids', [])
+    idx: int = int(data.get('assign_idx', 0))
+    if not sids or idx >= len(sids):
+        return False
+    sid = int(sids[idx])
+    with DBI._conn() as con:
+        row = con.execute("SELECT title FROM spectacles WHERE id=?", (sid,)).fetchone()
+    title = row[0] if row else "Спектакль"
+    await message_or_cb_msg.answer(
+        f"Новый спектакль из Excel: {title}\nНазначьте сотрудников:",
+        reply_markup=get_edit_employees_inline_kb(sid)
+    )
+    return True
+
 # ====== Handlers ======
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
@@ -562,6 +615,210 @@ class BusyInput(StatesGroup):
 class AdminBusyInput(StatesGroup):
     waiting_for_add = State()
     waiting_for_remove = State()
+
+# FSM for Excel upload flow
+class UploadExcel(StatesGroup):
+    waiting_for_month = State()
+class AssignUnknown(StatesGroup):
+    waiting = State()
+def get_month_pick_inline(today: date | None = None):
+    d = today or date.today()
+    buttons = []
+    for i in range(3):
+        m = d.month + i
+        y = d.year
+        if m > 12:
+            m -= 12
+            y += 1
+        label = f"{RU_MONTHS[m-1]} {y}"
+        cb = f"xlsmonth:{y:04d}-{m:02d}"
+        buttons.append([InlineKeyboardButton(text=label, callback_data=cb)])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+# ====== Handlers ======
+
+# Excel import helpers
+EXPECTED_EVENT_COLUMNS = {
+    'id': 'id',
+    'дата': 'date',
+    'тип': 'type',
+    'название': 'title',
+    'время': 'time',
+    'локация': 'location',
+    'город': 'city',
+    'сотрудник': 'employee',
+    'инфо': 'info',
+}
+
+def _normalize_event_columns(df: pd.DataFrame) -> pd.DataFrame:
+    # map columns by lower-case name
+    mapping = {}
+    for col in df.columns:
+        key = str(col).strip().lower()
+        if key in EXPECTED_EVENT_COLUMNS:
+            mapping[col] = EXPECTED_EVENT_COLUMNS[key]
+    return df.rename(columns=mapping)
+
+def import_events_from_excel(path: Path, year: int, month: int) -> tuple[int, int, list[str]]:
+    """Reads Excel and replaces events for given year-month. Returns (deleted, inserted, titles).
+    Expect 'Дата' to contain day numbers (1..31). Any month/year in file is ignored.
+    """
+    df = pd.read_excel(path)
+    df = _normalize_event_columns(df)
+    if 'date' not in df.columns:
+        raise ValueError("В Excel нет колонки 'Дата'")
+
+    # keep only expected columns
+    keep = ['date','type','title','time','location','city','employee','info']
+    for k in keep:
+        if k not in df.columns:
+            df[k] = None
+
+    # Coerce 'date' to day integers 1..max_day for selected month
+    import re, calendar as _cal
+    max_day = _cal.monthrange(year, month)[1]
+
+    def _to_day(v):
+        if pd.isna(v):
+            return None
+        # pandas Timestamp -> take day
+        if hasattr(v, 'day'):
+            try:
+                d = int(v.day)
+                return d if 1 <= d <= max_day else None
+            except Exception:
+                return None
+        # numeric (Excel may give floats)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            try:
+                d = int(v)
+                return d if 1 <= d <= max_day else None
+            except Exception:
+                return None
+        # string: extract first integer token
+        s = str(v).strip()
+        m = re.search(r"\d+", s)
+        if m:
+            try:
+                d = int(m.group(0))
+                return d if 1 <= d <= max_day else None
+            except Exception:
+                return None
+        return None
+
+    days = df['date'].map(_to_day)
+    df = df.assign(_day=days)
+    df = df[df['_day'].notna()]
+
+    # Build full YYYY-MM-DD from selected month/year and day
+    df['date'] = df['_day'].astype(int).map(lambda d: f"{year:04d}-{month:02d}-{d:02d}")
+    df = df.drop(columns=['_day'])
+
+    # Collect unique non-empty titles for the selected period
+    titles: list[str] = []
+    if 'title' in df.columns:
+        for v in df['title']:
+            if pd.isna(v):
+                continue
+            s = str(v).strip()
+            if s and s not in titles:
+                titles.append(s)
+
+    rows = []
+    for _, r in df.iterrows():
+        rows.append({
+            'date': r['date'],
+            'type': None if pd.isna(r['type']) else str(r['type']),
+            'title': None if pd.isna(r['title']) else str(r['title']),
+            'time': None if pd.isna(r['time']) else str(r['time']),
+            'location': None if pd.isna(r['location']) else str(r['location']),
+            'city': None if pd.isna(r['city']) else str(r['city']),
+            'employee': None if pd.isna(r['employee']) else str(r['employee']),
+            'info': None if pd.isna(r['info']) else str(r['info']),
+        })
+
+    # Replace in DB for chosen month
+    DBI.delete_events_for_month(year, month)
+    DBI.insert_events(rows)
+    return (0, len(rows), titles)
+
+
+# Handler to accept Excel from admin and ask for month
+async def handle_excel_upload(message: Message, state: FSMContext):
+    # admin only
+    if not _is_admin(message.from_user.id):
+        return
+    doc = message.document
+    if not doc:
+        return
+    # save to temp file
+    file = await message.bot.get_file(doc.file_id)
+    suffix = Path(doc.file_name or 'upload.xlsx').suffix or '.xlsx'
+    tmp = Path(tempfile.gettempdir()) / f"pultovik_upload_{message.from_user.id}{suffix}"
+    await message.bot.download_file(file.file_path, destination=tmp)
+    await state.update_data(upload_path=str(tmp))
+    await state.set_state(UploadExcel.waiting_for_month)
+    await message.answer("На какой месяц?", reply_markup=get_month_pick_inline())
+
+# Callback handler to import after month picked
+async def handle_excel_month_pick(callback: CallbackQuery, state: FSMContext):
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Только для админа", show_alert=True)
+        return
+    data = callback.data or ''
+    if not data.startswith('xlsmonth:'):
+        await callback.answer()
+        return
+    ym = data.split(':',1)[1]
+    try:
+        year_s, month_s = ym.split('-',1)
+        year = int(year_s); month = int(month_s)
+    except Exception:
+        await callback.answer("Неверный месяц", show_alert=True)
+        return
+    st = await state.get_data()
+    p = st.get('upload_path')
+    if not p:
+        await callback.answer("Файл не найден. Пришлите Excel заново.", show_alert=True)
+        return
+    try:
+        deleted, inserted, titles = import_events_from_excel(Path(p), year, month)
+    except Exception as e:
+        await callback.message.answer(f"Ошибка импорта: {e}")
+        await state.clear()
+        await callback.answer()
+        return
+    await state.clear()
+
+    # Find unknown spectacles, save them, and start sequential assignment
+    unknown_sids: list[int] = []
+    try:
+        known = set(DBI.list_spectacles())
+        for t in titles:
+            if t not in known:
+                DBI.upsert_spectacle(t)
+                sid = DBI.get_spectacle_id(t)
+                if sid is not None:
+                    unknown_sids.append(sid)
+    except Exception:
+        unknown_sids = []
+
+    if unknown_sids:
+        # Queue unknowns and start step-by-step assignment; postpone final import message
+        await state.update_data(
+            assign_unknown_sids=unknown_sids,
+            assign_idx=0,
+            import_inserted=inserted,
+            import_year=year,
+            import_month=month
+        )
+        await state.set_state(AssignUnknown.waiting)
+        await _send_next_unknown_for_assignment(callback.message, state)
+        await callback.answer("Готово")
+        return
+
+    # No unknowns — finish import immediately
+    await callback.message.answer(f"Импорт завершён: {inserted} записей за {RU_MONTHS[month - 1]} {year}")
+    await callback.answer("Готово")
 
 def get_user_busy_inline(user_id: int):
     if not can_show_user_busy_buttons(user_id):
@@ -986,6 +1243,33 @@ async def edit_employees_done(callback: CallbackQuery, state: FSMContext):
         ).fetchall()
         final_list = ", ".join(r[0] for r in rows) if rows else "нет"
     await callback.message.answer(f"Сохранено. {title}: {final_list}")
+
+    # If in sequential assignment flow, move to next unknown
+    st = await state.get_data()
+    sids = st.get('assign_unknown_sids')
+    if sids is not None:
+        try:
+            idx = int(st.get('assign_idx', 0)) + 1
+        except Exception:
+            idx = 1
+        if idx < len(sids):
+            await state.update_data(assign_idx=idx)
+            await _send_next_unknown_for_assignment(callback.message, state)
+            await callback.answer()
+            return
+        else:
+            # Finished all unknowns — send final import summary and clear state
+            inserted = st.get('import_inserted', 0)
+            year = st.get('import_year')
+            month = st.get('import_month')
+            await state.clear()
+            try:
+                await callback.message.answer(f"Импорт завершён: {inserted} записей за {RU_MONTHS[int(month)-1]} {int(year)}")
+            except Exception:
+                await callback.message.answer("Импорт завершён")
+            await callback.answer()
+            return
+
     await callback.answer()
 
 async def add_spectacle_name(message: Message, state: FSMContext):
@@ -1178,6 +1462,10 @@ async def main() -> None:
 
     dp.message.register(admin_handle_busy_add_text,    AdminBusyInput.waiting_for_add)
     dp.message.register(admin_handle_busy_remove_text, AdminBusyInput.waiting_for_remove)
+
+    # Excel upload handlers
+    dp.message.register(handle_excel_upload, F.document)
+    dp.callback_query.register(handle_excel_month_pick, F.data.startswith('xlsmonth:'))
 
     # background monthly broadcast
     asyncio.create_task(monthly_broadcast_task(bot))
