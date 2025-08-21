@@ -464,6 +464,23 @@ RU_MONTHS = [
     "Январь","Февраль","Март","Апрель","Май","Июнь",
     "Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь",
 ]
+
+# Genitive case month names for Russian dates
+RU_MONTHS_GEN = [
+    "января","февраля","марта","апреля","мая","июня",
+    "июля","августа","сентября","октября","ноября","декабря",
+]
+
+def human_ru_date(date_str: str) -> str:
+    """Convert 'YYYY-MM-DD' to 'D <месяца> YYYY' in Russian (e.g., '1 сентября 2025')."""
+    try:
+        y_s, m_s, d_s = date_str.split("-")
+        y = int(y_s); m = int(m_s); d = int(d_s)
+        if 1 <= m <= 12:
+            return f"{d} {RU_MONTHS_GEN[m-1]} {y}"
+        return date_str
+    except Exception:
+        return date_str
 def _is_admin(user_id: int) -> bool:
     return bool(ADMIN_ID) and str(user_id) == str(ADMIN_ID)
 
@@ -842,8 +859,8 @@ async def busy_view_text(message: Message, state: FSMContext):
     if eid is None:
         return
     dates = DBI.list_busy_dates(eid)
-    txt = ", ".join(dates) if dates else "пусто"
-    await message.answer(f"Ваши даты: {txt}", reply_markup=get_user_busy_manage_kb(user_id=message.from_user.id))
+    txt = "\n".join(human_ru_date(d) for d in dates) if dates else "пусто"
+    await message.answer(f"Ваши даты:\n{txt}", reply_markup=get_user_busy_manage_kb(user_id=message.from_user.id))
 
 async def _notify_admin_busy_change(bot: Bot, employee_id: int, action: str, items: list[str], user: Message | CallbackQuery):
     if not ADMIN_ID:
@@ -970,8 +987,8 @@ async def busy_view(callback: CallbackQuery, state: FSMContext):
         await callback.answer(); return
     eid = row[0]
     dates = DBI.list_busy_dates(eid)
-    txt = ", ".join(dates) if dates else "пусто"
-    await callback.message.answer(f"Ваши даты: {txt}", reply_markup=get_user_busy_manage_kb(user_id=callback.from_user.id))
+    txt = "\n".join(human_ru_date(d) for d in dates) if dates else "пусто"
+    await callback.message.answer(f"Ваши даты:\n{txt}", reply_markup=get_user_busy_manage_kb(user_id=callback.from_user.id))
     await callback.answer()
 
 async def busy_add(callback: CallbackQuery, state: FSMContext):
@@ -1158,7 +1175,7 @@ async def emp_busy_view(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Ошибка", show_alert=True)
         return
     dates = DBI.list_busy_dates(eid)
-    txt = ", ".join(dates) if dates else "пусто"
+    txt = "\n".join(human_ru_date(d) for d in dates) if dates else "пусто"
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Добавить", callback_data=f"empbusy:add:{eid}")
     kb.button(text="➖ Убрать", callback_data=f"empbusy:remove:{eid}")
