@@ -4,7 +4,7 @@ import sqlite3
 from typing import List
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, FSInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
@@ -30,6 +30,19 @@ MAIN_KB = ReplyKeyboardMarkup(
 DB_PATH = os.getenv("BOT_DB", "bot.db")
 
 class DB:
+    def count_assigned_for_month(self, employee_id: int, year: int, month: int) -> int:
+        prefix = f"{year:04d}-{month:02d}-"
+        with self._conn() as con:
+            row = con.execute(
+                """
+                SELECT COUNT(*)
+                FROM events ev
+                JOIN employees e ON e.display = ev.employee
+                WHERE e.id=? AND ev.date LIKE ?
+                """,
+                (employee_id, prefix + '%'),
+            ).fetchone()
+            return int(row[0] if row and row[0] is not None else 0)
     def __init__(self, path: str):
         self.path = path
         self._ensure()
@@ -481,6 +494,176 @@ def human_ru_date(date_str: str) -> str:
         return date_str
     except Exception:
         return date_str
+
+# ====== Auto-assignment helpers ======
+TYPE_ORDER = {"монтаж": 0, "репетиция": 1, "репетиции": 1, "спектакль": 2}
+
+def _normalize_type(tp: str | None) -> str:
+    if not tp:
+        return "спектакль"
+    s = str(tp).strip().lower()
+    if s.startswith("монтаж"):
+        return "монтаж"
+    if s.startswith("репет"):
+        return "репетиция"
+    if s.startswith("спект"):
+        return "спектакль"
+    return s
+
+# ... keep all helpers like _get_qualified_employee_ids, _date_busy_map_for_employees, _already_assigned_dates_map,
+# _pick_employee_for_block, _update_event_employee_by_ids, and auto_assign_events_for_month exactly as in my previous response.
+
+# --- Auto-assignment helpers ---
+def _get_qualified_employee_ids(title: str) -> set[int]:
+    # Returns set of employee IDs qualified for the given spectacle title
+    return DBI.get_spectacle_employee_ids(title)
+
+def _date_busy_map_for_employees(employee_ids: set[int]) -> dict[int, set[str]]:
+    # Returns {eid: set of busy dates (YYYY-MM-DD)}
+    busy_map = {}
+    for eid in employee_ids:
+        busy_map[eid] = set(DBI.list_busy_dates(eid))
+    return busy_map
+
+def _already_assigned_dates_map(events: list[dict]) -> dict[str, set[int]]:
+    # Returns {date: set of employee_ids already assigned}
+    date_map = {}
+    for ev in events:
+        d = ev.get('date')
+        emp = ev.get('employee')
+        if not d or not emp:
+            continue
+        # Employee may be stored as display name, but try to get ID
+        eid = DBI.get_employee_id(emp)
+        if eid is not None:
+            date_map.setdefault(d, set()).add(eid)
+    return date_map
+
+def _pick_employee_for_block(
+    block: list[dict],
+    qualified_ids: set[int],
+    busy_map: dict[int, set[str]],
+    assigned_dates: dict[str, set[int]],
+    prefer_not: int | None = None,
+) -> int | None:
+    """Выбор сотрудника для блока по правилам:
+    - Только из тех, кто привязан к спектаклю (qualified_ids)
+    - Не занят на эту дату (busy_map)
+    - Не назначен уже на эту дату (assigned_dates)
+    - Баланс по минимальному числу назначений в этом месяце
+    - В Москве при подряд идущих одинаковых названиях стараемся не ставить того же (prefer_not)
+    """
+    if not block or not qualified_ids:
+        return None
+
+    date = block[0].get("date")
+    if not date:
+        return None
+
+    # Фильтр по доступности и отсутствию даблбука
+    candidates: list[int] = []
+    for eid in qualified_ids:
+        if date in busy_map.get(eid, set()):
+            continue
+        if eid in assigned_dates.get(date, set()):
+            continue
+        candidates.append(eid)
+    if not candidates:
+        return None
+
+    # Баланс: минимальное число назначений в этом месяце
+    try:
+        y = int(date[0:4]); m = int(date[5:7])
+    except Exception:
+        y = 1970; m = 1
+    scored = [(DBI.count_assigned_for_month(eid, y, m), eid) for eid in candidates]
+    scored.sort()  # по количеству, затем по id
+    ordered = [eid for _, eid in scored]
+
+    # Избегаем prefer_not если есть альтернатива
+    if prefer_not is not None and len(ordered) > 1 and ordered[0] == prefer_not:
+        return ordered[1]
+
+    return ordered[0]
+
+def _update_event_employee_by_ids(event_ids: list[int], employee_id: int):
+    # Updates events (by rowid) to set employee by display name
+    with DBI._conn() as con:
+        row = con.execute("SELECT display FROM employees WHERE id=?", (employee_id,)).fetchone()
+        if not row:
+            return
+        display = row[0]
+        for eid in event_ids:
+            con.execute("UPDATE events SET employee=? WHERE id=?", (display, eid))
+        con.commit()
+
+def auto_assign_events_for_month(year: int | None = None, month: int | None = None) -> int:
+    # If year/month not given, process all events
+    with DBI._conn() as con:
+        if year and month:
+            prefix = f"{year:04d}-{month:02d}-"
+            rows = con.execute("SELECT id, date, type, title, city, employee FROM events WHERE date LIKE ?", (prefix + "%",)).fetchall()
+        else:
+            rows = con.execute("SELECT id, date, type, title, city, employee FROM events").fetchall()
+        # Build blocks: (date, type, title, city) -> [event dicts]
+        blocks = {}
+        for r in rows:
+            eid, d, t, title, city, emp = r
+            k = (d, _normalize_type(t), title, (city or '').strip())
+            blocks.setdefault(k, []).append({'id': eid, 'date': d, 'type': t, 'title': title, 'city': city, 'employee': emp})
+        # For each block, if employee is empty, assign
+        updated = 0
+        # Prepare busy maps
+        # Get all unique employees relevant for any block
+        all_titles = set(title for (_, _, title, _) in blocks.keys() if title)
+        all_emp_ids = set()
+        for title in all_titles:
+            all_emp_ids.update(_get_qualified_employee_ids(title))
+        busy_map = _date_busy_map_for_employees(all_emp_ids)
+        # Prepare already assigned map
+        assigned_dates = _already_assigned_dates_map([ev for block in blocks.values() for ev in block])
+        # Dict to remember last assigned employee per Moscow title
+        last_moscow_assignee: dict[str, int] = {}
+        # Sort blocks by (date, title, type order)
+        def _block_sort_key(k):
+            d, tp, title, city = k
+            tord = TYPE_ORDER.get(_normalize_type(tp), 99)
+            return (d, title or '', tord)
+        for k in sorted(blocks, key=_block_sort_key):
+            block = blocks[k]
+            # If all already assigned, skip
+            if all(ev.get('employee') for ev in block):
+                continue
+            date, tp, title, city = k
+            qualified = _get_qualified_employee_ids(title)
+            prefer_not = None
+            if (city or '').strip().lower() == 'москва':
+                # avoid repeating the same employee on consecutive same-title days in Moscow
+                prefer_not = last_moscow_assignee.get(title)
+            eid = _pick_employee_for_block(block, qualified, busy_map, assigned_dates, prefer_not=prefer_not)
+            if eid is not None:
+                ids_to_update = [ev['id'] for ev in block if not ev.get('employee')]
+                _update_event_employee_by_ids(ids_to_update, eid)
+                updated += len(ids_to_update)
+                # Update assigned_dates and busy_map
+                assigned_dates.setdefault(date, set()).add(eid)
+                busy_map.setdefault(eid, set()).add(date)
+                if (city or '').strip().lower() == 'москва':
+                    last_moscow_assignee[title] = eid
+        return updated
+async def handle_auto_assign(message: Message):
+    if not _is_admin(message.from_user.id):
+        await message.answer("Только для админа")
+        return
+    import re
+    m = re.search(r"(?i)^автоназначение\s*(\d{4})-(\d{2})\s*$", message.text or "")
+    if m:
+        y = int(m.group(1)); mo = int(m.group(2))
+        updated = auto_assign_events_for_month(y, mo)
+        await message.answer(f"Автоназначение за {RU_MONTHS[mo-1]} {y}: обновлено {updated}")
+    else:
+        updated = auto_assign_events_for_month()
+        await message.answer(f"Автоназначение (все события): обновлено {updated}")
 def _is_admin(user_id: int) -> bool:
     return bool(ADMIN_ID) and str(user_id) == str(ADMIN_ID)
 
@@ -491,7 +674,10 @@ def can_show_user_busy_buttons(user_id: int, today: date | None = None) -> bool:
 
 def get_user_busy_reply_kb(user_id: int) -> ReplyKeyboardMarkup:
     # Главные кнопки доступны только админу
-    base_rows = [[KeyboardButton(text="Спектакли"), KeyboardButton(text="Сотрудники")]] if _is_admin(user_id) else []
+    base_rows = []
+    if _is_admin(user_id):
+        base_rows = [[KeyboardButton(text="Спектакли"), KeyboardButton(text="Сотрудники")],
+                     [KeyboardButton(text="Сделать график")]]
 
     # Если кнопки занятости скрыты для пользователя — показываем только главное меню (если оно есть)
     if not can_show_user_busy_buttons(user_id):
@@ -638,7 +824,7 @@ class UploadExcel(StatesGroup):
     waiting_for_month = State()
 class AssignUnknown(StatesGroup):
     waiting = State()
-def get_month_pick_inline(today: date | None = None):
+def get_month_pick_inline(today: date | None = None, prefix: str = 'xlsmonth:'):
     d = today or date.today()
     buttons = []
     for i in range(3):
@@ -648,7 +834,7 @@ def get_month_pick_inline(today: date | None = None):
             m -= 12
             y += 1
         label = f"{RU_MONTHS[m-1]} {y}"
-        cb = f"xlsmonth:{y:04d}-{m:02d}"
+        cb = f"{prefix}{y:04d}-{m:02d}"
         buttons.append([InlineKeyboardButton(text=label, callback_data=cb)])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 # ====== Handlers ======
@@ -774,7 +960,82 @@ async def handle_excel_upload(message: Message, state: FSMContext):
     await message.bot.download_file(file.file_path, destination=tmp)
     await state.update_data(upload_path=str(tmp))
     await state.set_state(UploadExcel.waiting_for_month)
-    await message.answer("На какой месяц?", reply_markup=get_month_pick_inline())
+    await message.answer("На какой месяц?", reply_markup=get_month_pick_inline(prefix='xlsmonth:'))
+# ====== Make Schedule Handlers ======
+async def handle_make_schedule(message: Message, state: FSMContext):
+    if not _is_admin(message.from_user.id):
+        await message.answer("Только для админа")
+        return
+    await message.answer("На какой месяц сформировать график?", reply_markup=get_month_pick_inline(prefix='mkmonth:'))
+
+async def handle_make_schedule_pick(callback: CallbackQuery, state: FSMContext):
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Только для админа", show_alert=True)
+        return
+    data = callback.data or ''
+    if not data.startswith('xlsmonth:') and not data.startswith('mkmonth:'):
+        await callback.answer(); return
+    # поддержим оба префикса, но на отправку файла используем mkmonth:
+    if data.startswith('xlsmonth:'):
+        ym = data.split(':',1)[1]
+    else:
+        ym = data.split(':',1)[1]
+    try:
+        year_s, month_s = ym.split('-',1)
+        year = int(year_s); month = int(month_s)
+    except Exception:
+        await callback.answer("Неверный месяц", show_alert=True)
+        return
+
+    # автоназначение для выбранного месяца
+    updated = auto_assign_events_for_month(year, month)
+
+    # собрать события за месяц
+    prefix = f"{year:04d}-{month:02d}-"
+    with DBI._conn() as con:
+        evs = con.execute(
+            """
+            SELECT date, COALESCE(type,''), COALESCE(title,''), COALESCE(time,''),
+                   COALESCE(location,''), COALESCE(city,''), COALESCE(employee,''), COALESCE(info,'')
+            FROM events WHERE date LIKE ? ORDER BY date, title, time
+            """,
+            (prefix+'%',)
+        ).fetchall()
+
+    # Create dataframe without internal id and format columns
+    cols_internal = ["date","type","title","time","location","city","employee","info"]
+    df = pd.DataFrame(evs, columns=cols_internal)
+
+    # Human-readable Russian date, e.g., "2 сентября 2025"
+    df["date"] = df["date"].map(human_ru_date)
+
+    # Rename columns to nice Russian headers
+    df = df.rename(columns={
+        "date": "Дата",
+        "type": "Тип",
+        "title": "Название",
+        "time": "Время",
+        "location": "Локация",
+        "city": "Город",
+        "employee": "Сотрудник",
+        "info": "Инфо",
+    })
+
+    # сохранить во временный XLSX
+    out_path = Path(tempfile.gettempdir()) / f"График_{year}-{month:02d}.xlsx"
+    try:
+        df.to_excel(out_path, index=False)
+    except Exception as e:
+        await callback.message.answer(f"Ошибка формирования файла: {e}")
+        await callback.answer(); return
+
+    # отправить файл админу
+    try:
+        file = FSInputFile(str(out_path))
+        await callback.message.answer_document(file, caption=f"График на {RU_MONTHS[month-1]} {year}. Обновлено назначений: {updated}")
+    except Exception as e:
+        await callback.message.answer(f"Не удалось отправить файл: {e}")
+    await callback.answer("Готово")
 
 # Callback handler to import after month picked
 async def handle_excel_month_pick(callback: CallbackQuery, state: FSMContext):
@@ -1441,6 +1702,8 @@ async def main() -> None:
     dp.message.register(cmd_start, CommandStart())
     dp.message.register(handle_spectacles, F.text.lower() == "спектакли")
     dp.message.register(handle_workers, F.text.lower() == "сотрудники")
+    dp.message.register(handle_auto_assign, F.text.regexp(r"(?i)^автоназначение"))
+    dp.message.register(handle_make_schedule, F.text.lower() == "сделать график")
     # Inline callbacks (precise filters)
     dp.callback_query.register(edit_employees_toggle, F.data.startswith('edittoggle:'))
     dp.callback_query.register(edit_employees_done,   F.data.startswith('editdone:'))
@@ -1483,6 +1746,7 @@ async def main() -> None:
     # Excel upload handlers
     dp.message.register(handle_excel_upload, F.document)
     dp.callback_query.register(handle_excel_month_pick, F.data.startswith('xlsmonth:'))
+    dp.callback_query.register(handle_make_schedule_pick, F.data.startswith('mkmonth:') | F.data.startswith('xlsmonth:'))
 
     # background monthly broadcast
     asyncio.create_task(monthly_broadcast_task(bot))
