@@ -79,6 +79,17 @@ class DB:
                     info TEXT
                 )
             """)
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pending_auth (
+                    tg_id TEXT PRIMARY KEY,
+                    first_name TEXT,
+                    last_name TEXT,
+                    username TEXT,
+                    requested_at TEXT NOT NULL
+                )
+                """
+            )
             con.commit()
 
     # --- windows / broadcast
@@ -141,6 +152,16 @@ class DB:
         with self._conn() as con:
             return [(r[0], r[1]) for r in con.execute("SELECT id, display FROM employees ORDER BY last_name, first_name").fetchall()]
 
+    def list_all_employees(self) -> list[tuple[int, str]]:
+        """Return list of (id, display) for all employees ordered by last_name, first_name.
+        Wrapper kept for backward compatibility with older handlers expecting this name.
+        """
+        with self._conn() as con:
+            rows = con.execute(
+                "SELECT id, display FROM employees ORDER BY last_name, first_name"
+            ).fetchall()
+            return [(r[0], r[1]) for r in rows]
+
     def upsert_employee(self, last_name: str, first_name: str, tg_id: str | None = None):
         last_name = (last_name or '').strip()
         first_name = (first_name or '').strip()
@@ -171,6 +192,37 @@ class DB:
     def get_employee_by_tg(self, tg_id: int | str):
         with self._conn() as con:
             return con.execute("SELECT id, display FROM employees WHERE tg_id=?", (str(tg_id),)).fetchone()
+
+    # --- auth / pending users
+    def is_authorized(self, tg_id: int | str) -> bool:
+        return self.get_employee_by_tg(tg_id) is not None
+
+    def add_pending_auth(self, tg_id: int | str, first_name: str | None, last_name: str | None, username: str | None):
+        with self._conn() as con:
+            con.execute(
+                "INSERT OR REPLACE INTO pending_auth(tg_id, first_name, last_name, username, requested_at) VALUES(?,?,?,?,?)",
+                (str(tg_id), first_name or "", last_name or "", username or "", datetime.now(UTC).isoformat()),
+            )
+            con.commit()
+
+    def get_pending_auth(self, tg_id: int | str):
+        with self._conn() as con:
+            return con.execute(
+                "SELECT tg_id, first_name, last_name, username, requested_at FROM pending_auth WHERE tg_id=?",
+                (str(tg_id),),
+            ).fetchone()
+
+    def list_pending_auths(self) -> list[tuple[str, str, str, str, str]]:
+        with self._conn() as con:
+            rows = con.execute(
+                "SELECT tg_id, first_name, last_name, username, requested_at FROM pending_auth ORDER BY requested_at"
+            ).fetchall()
+            return [(r[0], r[1], r[2], r[3], r[4]) for r in rows]
+
+    def delete_pending_auth(self, tg_id: int | str) -> None:
+        with self._conn() as con:
+            con.execute("DELETE FROM pending_auth WHERE tg_id=?", (str(tg_id),))
+            con.commit()
 
     def set_spectacle_employees(self, title: str, employee_names: List[str]):
         self.upsert_spectacle(title)

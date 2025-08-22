@@ -19,7 +19,7 @@ from handlers.excel import (
     unknown_save_current,
     AssignUnknown,
 )
-from handlers.admin import handle_auto_assign
+from handlers.admin import handle_auto_assign, auth_list_employees, auth_approve, auth_deny, auth_new_start, auth_new_last_name, auth_new_first_name, NewAuthEmployee
 from handlers.ai_fill import ai_fill_start, ai_fill_receive, ai_fill_cancel, AIFillStates
 
 def register(dp: Dispatcher):
@@ -58,6 +58,15 @@ def register(dp: Dispatcher):
     # unknown spectacle handlers (after Excel registrations)
     dp.callback_query.register(unknown_toggle_employee, StateFilter(AssignUnknown.waiting), F.data.startswith('unkemp:'))
     dp.callback_query.register(unknown_save_current,    StateFilter(AssignUnknown.waiting), F.data == 'unksave')
+
+    # admin auth callbacks
+    dp.callback_query.register(auth_list_employees, F.data.startswith('auth:list:'))
+    dp.callback_query.register(auth_approve,       F.data.startswith('auth:approve:'))
+    dp.callback_query.register(auth_deny,          F.data.startswith('auth:deny:'))
+
+    dp.callback_query.register(auth_new_start, F.data.startswith('auth:new:'))
+    dp.message.register(auth_new_last_name, StateFilter(NewAuthEmployee.waiting_for_last_name))
+    dp.message.register(auth_new_first_name, StateFilter(NewAuthEmployee.waiting_for_first_name))
 
     # FSM routes
     dp.message.register(add_spectacle_name, StateFilter(AddSpectacle.waiting_for_name))
