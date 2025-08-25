@@ -1,7 +1,7 @@
 # keyboards/inline.py
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from config import RU_MONTHS
+from config import RU_MONTHS, ADMIN_ID
 from db import DBI
 from datetime import date
 
@@ -48,11 +48,20 @@ def get_spectacle_info_kb(sid: int) -> InlineKeyboardMarkup:
     b.adjust(1)
     return b.as_markup()
 
-def get_user_busy_manage_kb() -> InlineKeyboardMarkup:
+def get_user_busy_manage_kb(user_id: int | None = None) -> InlineKeyboardMarkup:
+    """Клавиатура управления занятостью: у обычных пользователей скрыта, у админа есть кнопки."""
     b = InlineKeyboardBuilder()
-    b.button(text="➕ Добавить", callback_data="busy:add")
-    b.button(text="➖ Убрать", callback_data="busy:remove")
-    b.adjust(2)
+    is_admin = user_id is not None and str(user_id) == str(ADMIN_ID)
+    # отладочный принт (виден в консоли бота)
+    try:
+        print(f"[KB] build for user={user_id} is_admin={is_admin} ADMIN_ID={ADMIN_ID}")
+    except Exception:
+        pass
+    if is_admin:
+        b.button(text="➕ Добавить", callback_data="busy:add")
+        b.button(text="➖ Убрать", callback_data="busy:remove")
+        b.adjust(2)
+    # Если не админ — вернём пустую инлайн-клавиатуру (кнопок редактирования не будет)
     return b.as_markup()
 
 def get_month_pick_inline(today: date | None = None, prefix: str = "xlsmonth:") -> InlineKeyboardMarkup:

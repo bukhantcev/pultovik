@@ -6,7 +6,7 @@ from handlers.start import cmd_start
 from handlers.spectacles import handle_spectacles, spectacles_menu_router, edit_employees_start, edit_employees_toggle, edit_employees_done, add_spectacle_name, AddSpectacle, delete_spectacle
 from aiogram.fsm.context import FSMContext
 from handlers.employees import handle_workers, employees_menu_router, emp_del_ask, emp_del_yes, emp_del_no, emp_tg_start, emp_tg_set_value, AddEmployee, EditEmployeeTg
-from handlers.busy_user import busy_submit_text, busy_view_text, BusyInput, busy_submit, busy_view, handle_busy_add_text, handle_busy_remove_text
+from handlers.busy_user import busy_submit_text, busy_view_text, BusyInput, busy_submit, busy_view, handle_busy_add_text, handle_busy_remove_text, busy_add, busy_remove
 from handlers.busy_admin import admin_busy_panel, emp_busy_view, emp_busy_add_start, emp_busy_remove_start, admin_handle_busy_add_text, admin_handle_busy_remove_text, AdminBusyInput
 from handlers.excel import (
     import_schedule_start,
@@ -77,6 +77,8 @@ def register(dp: Dispatcher):
     # busy (user)
     dp.callback_query.register(busy_submit, F.data == 'busy:submit')
     dp.callback_query.register(busy_view,   F.data == 'busy:view')
+    dp.callback_query.register(busy_add,    F.data == 'busy:add')
+    dp.callback_query.register(busy_remove, F.data == 'busy:remove')
     dp.message.register(busy_submit_text, F.text.regexp(r"^Подать даты за "))
     dp.message.register(busy_view_text,   F.text.lower() == "посмотреть свои даты")
     dp.message.register(handle_busy_add_text,    StateFilter(BusyInput.waiting_for_add_user))
