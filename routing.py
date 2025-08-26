@@ -5,7 +5,7 @@ from aiogram.filters import StateFilter
 from handlers.start import cmd_start
 from handlers.spectacles import handle_spectacles, spectacles_menu_router, edit_employees_start, edit_employees_toggle, edit_employees_done, add_spectacle_name, AddSpectacle, delete_spectacle
 from aiogram.fsm.context import FSMContext
-from handlers.employees import handle_workers, employees_menu_router, emp_del_ask, emp_del_yes, emp_del_no, emp_tg_start, emp_tg_set_value, AddEmployee, EditEmployeeTg
+from handlers.employees import handle_workers, employees_menu_router, emp_del_ask, emp_del_yes, emp_del_no, emp_tg_start, emp_tg_set_value, AddEmployee, EditEmployeeTg, add_employee_last_name, add_employee_first_name, add_employee_tg
 from handlers.busy_user import busy_submit_text, busy_view_text, BusyInput, busy_submit, busy_view, handle_busy_add_text, handle_busy_remove_text, busy_add, busy_remove
 from handlers.busy_admin import admin_busy_panel, emp_busy_view, emp_busy_add_start, emp_busy_remove_start, admin_handle_busy_add_text, admin_handle_busy_remove_text, AdminBusyInput
 from handlers.excel import (
@@ -20,7 +20,7 @@ from handlers.excel import (
     AssignUnknown,
 )
 from handlers.admin import handle_auto_assign, auth_list_employees, auth_approve, auth_deny, auth_new_start, auth_new_last_name, auth_new_first_name, NewAuthEmployee
-from handlers.ai_fill import ai_fill_start, ai_fill_receive, ai_fill_cancel, AIFillStates
+from handlers.ai_fill import ai_fill_start, ai_fill_receive, ai_fill_cancel, AIFillStates, ai_fill_site_start, ai_fill_site_pick
 
 def register(dp: Dispatcher):
     # base
@@ -37,6 +37,8 @@ def register(dp: Dispatcher):
     dp.message.register(admin_busy_panel, F.text.lower() == "busy_admin")
 
     dp.message.register(ai_fill_start, F.text.lower() == "ai заполнить шаблон")
+    dp.callback_query.register(ai_fill_site_start, F.data == 'ai:site')
+    dp.callback_query.register(ai_fill_site_pick,  F.data.startswith('ai:sitepick:'))
 
     # spectacles callbacks
     dp.callback_query.register(
@@ -73,6 +75,10 @@ def register(dp: Dispatcher):
     dp.message.register(emp_tg_set_value,   StateFilter(EditEmployeeTg.waiting_for_tg))
     dp.message.register(admin_handle_busy_add_text,    StateFilter(AdminBusyInput.waiting_for_add))
     dp.message.register(admin_handle_busy_remove_text, StateFilter(AdminBusyInput.waiting_for_remove))
+
+    dp.message.register(add_employee_last_name, StateFilter(AddEmployee.waiting_for_last_name))
+    dp.message.register(add_employee_first_name, StateFilter(AddEmployee.waiting_for_first_name))
+    dp.message.register(add_employee_tg,        StateFilter(AddEmployee.waiting_for_tg_id))
 
     # busy (user)
     dp.callback_query.register(busy_submit, F.data == 'busy:submit')

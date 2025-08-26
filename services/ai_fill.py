@@ -20,7 +20,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 async def describe_image(path: Path) -> str:
     """
     Отправляет изображение в OpenAI и возвращает его описание на русском языке.
-    (Используется для отладочных сценариев, основная логика — build_excel_from_file.)
+    (Используется для отладочных сценариев, основная логика — build_excel_from_file / build_excel_from_site.)
     """
     ext = (path.suffix or '').lower()
     mime = 'image/jpeg'
@@ -214,19 +214,10 @@ def _rows_to_xlsx(rows: list[list[str]], out_path: Path) -> None:
 
 
 async def build_excel_from_file(path: Path) -> FSInputFile:
-    # """Отправляет файл (фото/PDF/таблица) в GPT и собирает .xlsx по нашему шаблону.
-    # Гарантирует, что ВСЕ дни месяца присутствуют, а последняя строка не теряется.
-    # """
-    # instructions = (
-    #     "Преобразуй присланный файл в расписание. Верни ТОЛЬКО CSV (UTF-8) без лишнего текста.\n"
-    #     "Первая строка — заголовки: Дата,Тип,Название,Время,Локация,Город,Сотрудник,Инфо.\n"
-    #     "Каждая следующая строка — одно событие. Пустые значения оставляй пустыми.\n"
-    #     "Формат даты — человекочитаемый на русском (например: 1 сентября 2025).\n"
-    #     "Не добавляй комментарии, пояснения, кодовые блоки. Только CSV.\n"
-    #     "Событие должно точно соответствовать дате! Перепроверяй себя!\n"
-    #     "12 в графе Название - это спектакль.\n"
-    #     "тип мероприятия может быть Репетиция, Монтаж, все что не подходит под них - Спектакль."
-    # )
+    """
+    Отправляет файл (фото/PDF/таблица) в GPT и собирает .xlsx по нашему шаблону.
+    Гарантирует, что ВСЕ дни месяца присутствуют, а последняя строка не теряется.
+    """
     instructions = SYSTEM_PROMPT
 
     ext = (path.suffix or '').lower()
@@ -257,4 +248,43 @@ async def build_excel_from_file(path: Path) -> FSInputFile:
     out_path = path.parent / f"ai_out_{path.stem}.xlsx"
     _rows_to_xlsx(rows, out_path)
 
+    return FSInputFile(str(out_path))
+
+
+async def build_excel_from_site(raw_text: str, month: int, year: int, tmp_name: str = "site") -> FSInputFile:
+    """
+    Принимает сырой текст, собранный с сайта (все элементы c-playbill--item),
+    отправляет в GPT с инструкцией собрать CSV по шаблону, затем формирует .xlsx.
+
+    raw_text — уже очищенный текст всего расписания за выбранный месяц.
+    """
+    # даём модели чёткие рамки: месяц/год уже известны
+    prompt = (
+        SYSTEM_PROMPT
+        + "\n\n"
+        + f"Работай строго для месяца: {month:02d}.{year} (все даты этого периода). "
+          "Если в тексте отсутствуют некоторые дни, всё равно формируй строки для этих дней с пустыми полями кроме даты. "
+          "Основная сцена - это Поварская, город Москва"
+          "Верни ТОЛЬКО CSV (UTF-8) без пояснений и без блоков кода."
+    )
+
+    resp = client.responses.create(
+        model=GPT_MODEL,
+        input=[{
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": prompt},
+                {"type": "input_text", "text": raw_text},
+            ],
+        }],
+    )
+
+    text = getattr(resp, 'output_text', None) or str(resp)
+    print(text)
+    csv_text = _strip_code_fences(text)
+
+    rows = _normalize_csv(csv_text)
+
+    out_path = Path.cwd() / f"ai_out_{tmp_name}_{year}-{month:02d}.xlsx"
+    _rows_to_xlsx(rows, out_path)
     return FSInputFile(str(out_path))

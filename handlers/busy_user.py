@@ -9,6 +9,7 @@ from utils.dates import next_month_and_year, parse_days_for_month, format_busy_d
 from services.busy_flow import ensure_known_user_or_report_message, notify_admin_busy_change
 from datetime import date
 from config import ADMIN_ID
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 class BusyInput(StatesGroup):
     waiting_for_add_user = State()
@@ -19,7 +20,7 @@ def _is_admin(user_id: int | None) -> bool:
 
 def _after_25_for_non_admin(user_id: int | None) -> bool:
     try:
-        return (not _is_admin(user_id)) and date.today().day >= 25
+        return (not _is_admin(user_id)) and date.today().day >= 30
     except Exception:
         return False
 
@@ -38,7 +39,11 @@ async def busy_view_text(message: Message, state: FSMContext):
     if eid is None: return
     dates = DBI.list_busy_dates(eid)
     txt = "\n".join(human_ru_date(d) for d in dates) if dates else "пусто"
-    await message.answer(f"Ваши даты:\n{txt}", reply_markup=get_user_busy_manage_kb(user_id=message.from_user.id))
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Добавить", callback_data="busy:add")
+    kb.button(text="➖ Убрать", callback_data="busy:remove")
+    kb.adjust(2)
+    await message.answer(f"Ваши даты:\n{txt}", reply_markup=kb.as_markup())
 
 async def busy_submit(callback: CallbackQuery, state: FSMContext):
     row = DBI.get_employee_by_tg(callback.from_user.id)
@@ -62,7 +67,11 @@ async def busy_view(callback: CallbackQuery, state: FSMContext):
     eid = row[0]
     dates = DBI.list_busy_dates(eid)
     txt = "\n".join(human_ru_date(d) for d in dates) if dates else "пусто"
-    await callback.message.answer(f"Ваши даты:\n{txt}", reply_markup=get_user_busy_manage_kb(user_id=callback.from_user.id))
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Добавить", callback_data="busy:add")
+    kb.button(text="➖ Убрать", callback_data="busy:remove")
+    kb.adjust(2)
+    await callback.message.answer(f"Ваши даты:\n{txt}", reply_markup=kb.as_markup())
     await callback.answer()
 
 async def handle_busy_add_text(message: Message, state: FSMContext):

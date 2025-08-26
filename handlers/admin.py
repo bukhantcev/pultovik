@@ -64,7 +64,11 @@ async def auth_list_employees(callback: CallbackQuery):
     # собрать список сотрудников
     rows = DBI.list_all_employees()
     if not rows:
-        await callback.message.answer("Нет сотрудников в базе")
+        kb = InlineKeyboardBuilder()
+        kb.button(text="➕ Новый сотрудник", callback_data=f"auth:new:{target_tg}")
+        kb.button(text="Отклонить", callback_data=f"auth:deny:{target_tg}")
+        kb.adjust(1)
+        await callback.message.answer("Нет сотрудников в базе. Добавить нового?", reply_markup=kb.as_markup())
         await callback.answer(); return
 
     kb = InlineKeyboardBuilder()

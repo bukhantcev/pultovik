@@ -17,10 +17,31 @@ DATA_DIR.mkdir(exist_ok=True)
 if load_dotenv:
     load_dotenv(ROOT_DIR / ".env")
 
+
 # --- OpenAI
 OPENAI_API_KEY: str = (os.getenv("OPENAI_API_KEY") or "").strip()
 GPT_MODEL: str = (os.getenv("GPT_MODEL") or "gpt-4o-mini").strip()
 ENABLE_AI_FILL: bool = (os.getenv("ENABLE_AI_FILL", "1").strip().lower() not in {"0", "false", "no"})
+
+# --- Playbill scraping
+# You can override via .env: PLAYBILL_URL_TEMPLATE="https://mikhalkov12.ru/playbill/?month={m}&year={y}"
+PLAYBILL_URL_TEMPLATE: str = (
+    os.getenv("PLAYBILL_URL_TEMPLATE")
+    or "https://mikhalkov12.ru/playbill/?month={m}&year={y}"
+)
+
+def build_playbill_url(month: int, year: int) -> str:
+    """Return URL for the theater playbill page for given month/year.
+    Example: https://mikhalkov12.ru/playbill/?month=9&year=2025
+    """
+    try:
+        m = int(month)
+        y = int(year)
+    except Exception:
+        raise ValueError("month and year must be integers")
+    if not (1 <= m <= 12):
+        raise ValueError("month must be in 1..12")
+    return PLAYBILL_URL_TEMPLATE.format(m=m, y=y)
 
 BOT_TOKEN: str = (os.getenv("BOT_TOKEN") or "").strip()
 ADMIN_ID: int | None = None

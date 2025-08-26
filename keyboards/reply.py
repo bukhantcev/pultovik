@@ -27,7 +27,7 @@ def get_user_busy_reply_kb(user_id: int) -> ReplyKeyboardMarkup:
     # After the 25th, non-admin users should not see "Подать даты" — only "Посмотреть свои даты"
     today = date.today()
     show_submit = True
-    if not is_admin(user_id) and today.day >= 25:
+    if not is_admin(user_id) and today.day >= 30:
         show_submit = False
 
     if has_busy or not show_submit:

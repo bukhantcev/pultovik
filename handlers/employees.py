@@ -19,8 +19,17 @@ class EditEmployeeTg(StatesGroup):
 async def handle_workers(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         await message.answer("Только для админа"); return
-    txt = "Выберите сотрудника или добавьте нового:" if DBI.list_employees() else "Список пуст. Нажмите «➕ Добавить»."
-    await message.answer(txt, reply_markup=get_employees_inline_kb())
+    emps = DBI.list_employees()
+    txt = "Выберите сотрудника или добавьте нового:" if emps else "Список пуст. Нажмите «➕ Добавить»."
+    # если сотрудников нет — показываем хотя бы одну кнопку «➕ Добавить»
+    if emps:
+        kb = get_employees_inline_kb()
+    else:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="➕ Добавить", callback_data="emp:add")
+        builder.adjust(1)
+        kb = builder.as_markup()
+    await message.answer(txt, reply_markup=kb)
 
 async def employees_menu_router(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -28,7 +37,7 @@ async def employees_menu_router(callback: CallbackQuery, state: FSMContext):
     data = callback.data or ""
     if data == "emp:add":
         await state.set_state(AddEmployee.waiting_for_last_name)
-        await callback.message.answer("Напиши фамилию сотрудника", reply_markup=ReplyKeyboardRemove())
+        await callback.message.answer("Введите фамилию нового сотрудника:", reply_markup=ReplyKeyboardRemove())
         await callback.answer(); return
     if data.startswith("emp:show:"):
         disp = data.split(":", 2)[2]
@@ -102,3 +111,53 @@ async def emp_tg_set_value(message: Message, state: FSMContext):
     DBI.set_employee_tg_by_id(eid, (message.text or '').strip())
     await message.answer("Telegram ID обновлён ✅")
     await state.clear()
+
+async def add_employee_last_name(message: Message, state: FSMContext):
+    # Admin-only guard
+    if not is_admin(message.from_user.id):
+        await message.answer("Только для админа");
+        return
+    ln = (message.text or '').strip()
+    if not ln:
+        await message.answer("Фамилия обязательна. Введите фамилию ещё раз.")
+        return
+    await state.update_data(last_name=ln)
+    await state.set_state(AddEmployee.waiting_for_first_name)
+    await message.answer("Теперь напиши имя сотрудника")
+
+async def add_employee_first_name(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await message.answer("Только для админа");
+        return
+    fn = (message.text or '').strip()
+    if not fn:
+        await message.answer("Имя обязательное. Введите имя ещё раз.")
+        return
+    await state.update_data(first_name=fn)
+    await state.set_state(AddEmployee.waiting_for_tg_id)
+    await message.answer("Отправь Telegram ID (или напиши \"Пропустить\")")
+
+async def add_employee_tg(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await message.answer("Только для админа");
+        return
+    data = await state.get_data()
+    ln = data.get('last_name')
+    fn = data.get('first_name')
+    if not ln or not fn:
+        await message.answer("Нет данных для сохранения. Начните заново через меню ‘Сотрудники’.")
+        await state.clear()
+        return
+    tg_raw = (message.text or '').strip()
+    tg_id = None if tg_raw.lower() == 'пропустить' else tg_raw
+    try:
+        DBI.upsert_employee(ln, fn, tg_id)
+        await message.answer(f"Сотрудник сохранён: {ln} {fn}")
+    except Exception as e:
+        await message.answer(f"Ошибка сохранения: {e}")
+        await state.clear()
+        return
+    await state.clear()
+    # Показать актуальный список после добавления
+    txt = "Выберите сотрудника или добавьте нового:" if DBI.list_employees() else "Список пуст. Нажмите «➕ Добавить»."
+    await message.answer(txt, reply_markup=get_employees_inline_kb())
