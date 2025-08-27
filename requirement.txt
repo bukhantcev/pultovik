@@ -4,3 +4,7 @@ pandas
 openpyxl
 openai
 pdfminer.six
+aiohttp
+beautifulsoup4
+gspread
+google-auth
