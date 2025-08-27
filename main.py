@@ -5,6 +5,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from config import BOT_TOKEN
 from routing import register
 from handlers.admin import monthly_broadcast_task
+from services.busy_flow import monthly_reminders_task
 
 async def main():
     if not BOT_TOKEN:
@@ -13,6 +14,7 @@ async def main():
     dp = Dispatcher(storage=MemoryStorage())
     register(dp)
     asyncio.create_task(monthly_broadcast_task(bot))
+    asyncio.create_task(monthly_reminders_task(bot))
     print("Bot is running… Press Ctrl+C to stop.")
     await dp.start_polling(bot)
 

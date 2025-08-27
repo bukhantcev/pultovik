@@ -1,6 +1,7 @@
 # handlers/excel.py
 from pathlib import Path
 import tempfile
+import pandas as pd
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
@@ -11,6 +12,7 @@ from keyboards.inline import get_month_pick_inline, get_edit_employees_inline_kb
 from services.excel_import import import_events_from_excel
 from services.excel_export import export_month_schedule, file_as_input, month_caption
 from services.auto_assign import auto_assign_events_for_month
+from services.google_sheets import publish_schedule_to_sheets
 from db import DBI
 
 router = Router()
@@ -131,6 +133,62 @@ async def handle_make_schedule_pick(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer(f"Не удалось отправить файл: {e}")
     await callback.answer("Готово")
 
+@router.message(F.text == "Опубликовать")
+async def publish_start(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await message.answer("Только для админа");
+        return
+    await message.answer(
+        "За какой месяц опубликовать в Google Sheets?",
+        reply_markup=get_month_pick_inline(prefix='pubmonth:')
+    )
+
+@router.callback_query(F.data.startswith('pubmonth:'))
+async def publish_month_pick(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Только для админа", show_alert=True);
+        return
+    data = callback.data or ''
+    if not data.startswith('pubmonth:'):
+        await callback.answer();
+        return
+    try:
+        year, month = map(int, data.split(':', 1)[1].split('-', 1))
+    except Exception:
+        await callback.answer("Неверный месяц", show_alert=True);
+        return
+
+    # Сначала сформируем файл (на всякий случай) и посчитаем записи
+    try:
+        xlsx_path, count = export_month_schedule(year, month)
+    except Exception as e:
+        await callback.message.answer(f"Ошибка формирования файла перед публикацией: {e}")
+        await callback.answer();
+        return
+
+    # Прочитаем сформированный файл в DataFrame для публикации
+    try:
+        df = pd.read_excel(xlsx_path)
+    except Exception as e:
+        await callback.message.answer(f"Не удалось прочитать XLSX перед публикацией: {e}")
+        await callback.answer()
+        return
+
+    # Публикация в Google Sheets
+    try:
+        sheet_url, sheet_title = publish_schedule_to_sheets(year, month, df)
+    except Exception as e:
+        await callback.message.answer(f"Ошибка публикации в Google Sheets: {e}")
+        await callback.answer();
+        return
+
+    caption = f"Опубликовано: {RU_MONTHS[month-1]} {year} — {count} событ."
+    if sheet_url:
+        caption += f"\nЛист: {sheet_title} — {sheet_url}"
+
+    await callback.message.answer(caption)
+    await callback.answer("Готово")
+
 @router.callback_query(F.data.startswith('unkemp:'), AssignUnknown.waiting)
 async def unknown_toggle_employee(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -207,3 +265,44 @@ async def unknown_save_current(callback: CallbackQuery, state: FSMContext):
     else:
         await callback.message.answer(f"Импорт завершён: {inserted} записей за {RU_MONTHS[month-1]} {year}")
     await callback.answer()
+
+@router.message(F.text == "Посмотреть расписание")
+async def view_schedule_start(message: Message, state: FSMContext):
+    # Кнопка доступна всем пользователям; просто спрашиваем месяц
+    await message.answer(
+        "За какой месяц показать расписание?",
+        reply_markup=get_month_pick_inline(prefix='viewmonth:')
+    )
+
+
+@router.callback_query(F.data.startswith('viewmonth:'))
+async def view_schedule_pick(callback: CallbackQuery, state: FSMContext):
+    data = callback.data or ''
+    if not data.startswith('viewmonth:'):
+        await callback.answer(); return
+    try:
+        year, month = map(int, data.split(':', 1)[1].split('-', 1))
+    except Exception:
+        await callback.answer("Неверный месяц", show_alert=True); return
+
+    # Экспортируем как есть, без автоназначения
+    try:
+        path, count = export_month_schedule(year, month)
+    except Exception as e:
+        await callback.message.answer(f"Ошибка формирования расписания: {e}")
+        await callback.answer(); return
+
+    if (count or 0) > 0:
+        try:
+            await callback.message.answer_document(
+                file_as_input(path),
+                caption=f"Расписание на {RU_MONTHS[month-1]} {year} — {count} событ."
+            )
+        except Exception as e:
+            await callback.message.answer(f"Не удалось отправить файл: {e}")
+    else:
+        await callback.message.answer(
+            f"Пока нет расписания за {RU_MONTHS[month-1]} {year}"
+        )
+
+    await callback.answer("Готово")

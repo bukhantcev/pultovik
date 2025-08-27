@@ -13,10 +13,13 @@ def get_user_busy_reply_kb(user_id: int) -> ReplyKeyboardMarkup:
         base_rows = [
             [KeyboardButton(text="Спектакли"), KeyboardButton(text="Сотрудники")],
             [KeyboardButton(text="Сделать график")],
+            [KeyboardButton(text="Опубликовать")],
             [KeyboardButton(text="Импорт расписания")]
         ]
         if ENABLE_AI_FILL:
             base_rows.append([KeyboardButton(text="AI заполнить шаблон")])
+    # Always show 'Посмотреть расписание' button for everyone
+    base_rows.append([KeyboardButton(text="Посмотреть расписание")])
 
     m, y, mname = next_month_and_year()
     has_busy = False

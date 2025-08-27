@@ -18,6 +18,10 @@ from handlers.excel import (
     unknown_toggle_employee,
     unknown_save_current,
     AssignUnknown,
+    view_schedule_start,
+    view_schedule_pick,
+    publish_start,
+    publish_month_pick,
 )
 from handlers.admin import handle_auto_assign, auth_list_employees, auth_approve, auth_deny, auth_new_start, auth_new_last_name, auth_new_first_name, NewAuthEmployee
 from handlers.ai_fill import ai_fill_start, ai_fill_receive, ai_fill_cancel, AIFillStates, ai_fill_site_start, ai_fill_site_pick
@@ -30,10 +34,14 @@ def register(dp: Dispatcher):
     dp.message.register(handle_spectacles, F.text.lower() == "спектакли")
     dp.message.register(handle_workers, F.text.lower() == "сотрудники")
 
+    dp.message.register(view_schedule_start, F.text == "Посмотреть расписание")
+    dp.callback_query.register(view_schedule_pick, F.data.startswith('viewmonth:'))
+
     # admin actions
     dp.message.register(handle_auto_assign, F.text.regexp(r"(?i)^автоназначение"))
     dp.message.register(import_schedule_start, F.text.lower() == "импорт расписания")
     dp.message.register(handle_make_schedule, F.text.lower() == "сделать график")
+    dp.message.register(publish_start, F.text == "Опубликовать")
     dp.message.register(admin_busy_panel, F.text.lower() == "busy_admin")
 
     dp.message.register(ai_fill_start, F.text.lower() == "ai заполнить шаблон")
@@ -99,6 +107,7 @@ def register(dp: Dispatcher):
     dp.message.register(handle_excel_upload, StateFilter(UploadExcel.waiting_for_file), F.document)
     dp.callback_query.register(handle_excel_month_pick, StateFilter(UploadExcel.waiting_for_month), F.data.startswith('xlsmonth:'))
     dp.callback_query.register(handle_make_schedule_pick, F.data.startswith('mkmonth:'))
+    dp.callback_query.register(publish_month_pick, F.data.startswith('pubmonth:'))
 
     # AI fill FSM
     dp.message.register(ai_fill_cancel,  StateFilter(AIFillStates.waiting_for_file), F.text.lower() == "отмена")

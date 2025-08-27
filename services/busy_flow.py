@@ -4,6 +4,8 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from db import DBI
 from config import ADMIN_ID
+from datetime import date
+from utils.dates import next_month_and_year
 
 async def ensure_known_user_or_report_message(event: Union[Message, CallbackQuery]) -> int | None:
     """
@@ -62,3 +64,62 @@ async def notify_admin_busy_change(bot, employee_id: int, action: str, items: li
         await bot.send_message(ADMIN_ID, text)
     except Exception:
         pass
+
+# --- PERIODIC REMINDERS (12th and 24th of each month) ---
+_last_reminder_stamp: tuple[int, int, int] | None = None  # (YYYY, MM, DD)
+
+async def monthly_reminders_task(bot):
+    """
+    Periodic background task: on the 12th and 24th of each month
+    reminds employees (who haven't submitted yet) to provide busy dates
+    for the *next* month (the same logic we use elsewhere).
+    Runs forever, sleeping ~1 hour between checks.
+    """
+    global _last_reminder_stamp
+    while True:
+        try:
+            today = date.today()
+            # Fire only on 12th or 24th and only once per calendar day
+            if today.day in (12, 24):
+                stamp = (today.year, today.month, today.day)
+                if _last_reminder_stamp != stamp:
+                    # Next month/year & name (e.g., "Октябрь")
+                    next_m, next_y, mname = next_month_and_year(today)
+
+                    # Who hasn't submitted yet for next month
+                    to_notify = []
+                    try:
+                        rows = DBI.list_employees_with_tg()  # [(id, display, tg_id_int)]
+                        for eid, disp, tg in rows:
+                            try:
+                                if not DBI.has_submitted(eid, next_y, next_m):
+                                    to_notify.append((eid, disp, tg))
+                            except Exception:
+                                continue
+                    except Exception:
+                        rows = []
+                        to_notify = []
+
+                    if to_notify:
+                        # Day-specific phrasing
+                        suffix = " Сегодня последний день!" if today.day == 24 else ""
+                        for _, disp, tg in to_notify:
+                            try:
+                                text = f"{disp}, напомню: пришлите занятые даты за {mname} до 25 числа.{suffix}"
+                                await bot.send_message(tg, text)
+                            except Exception:
+                                # ignore individual delivery errors
+                                pass
+
+                    _last_reminder_stamp = stamp
+        except Exception:
+            # swallow errors to keep the task alive
+            pass
+
+        # Check roughly hourly
+        try:
+            import asyncio
+            await asyncio.sleep(3600)
+        except Exception:
+            # If event loop is shutting down, just break
+            break
