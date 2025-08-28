@@ -3,7 +3,7 @@ from aiogram import Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.filters import StateFilter
 from handlers.start import cmd_start
-from handlers.spectacles import handle_spectacles, spectacles_menu_router, edit_employees_start, edit_employees_toggle, edit_employees_done, add_spectacle_name, AddSpectacle, delete_spectacle
+from handlers.spectacles import handle_spectacles, spectacles_menu_router, edit_employees_start, edit_employees_toggle, edit_employees_done, add_spectacle_name, AddSpectacle, delete_spectacle, rename_spectacle_start, rename_spectacle_save, RenameSpectacle, edit_spectacle_start
 from aiogram.fsm.context import FSMContext
 from handlers.employees import handle_workers, employees_menu_router, emp_del_ask, emp_del_yes, emp_del_no, emp_tg_start, emp_tg_set_value, AddEmployee, EditEmployeeTg, add_employee_last_name, add_employee_first_name, add_employee_tg
 from handlers.busy_user import busy_submit_text, busy_view_text, BusyInput, busy_submit, busy_view, handle_busy_add_text, handle_busy_remove_text, busy_add, busy_remove
@@ -53,10 +53,13 @@ def register(dp: Dispatcher):
         spectacles_menu_router,
         (F.data == 'add_spectacle') | F.data.startswith('title:') | F.data.startswith('t:')
     )
+    dp.callback_query.register(edit_spectacle_start, F.data.startswith('edit_spectacle:'))
     dp.callback_query.register(edit_employees_start,  F.data.startswith('editstart:'))
     dp.callback_query.register(edit_employees_toggle, F.data.startswith('edittoggle:'))
     dp.callback_query.register(edit_employees_done,   F.data.startswith('editdone:'))
     dp.callback_query.register(delete_spectacle, F.data.startswith('del_spectacle:'))
+    dp.callback_query.register(rename_spectacle_start, F.data.startswith('rename_spectacle:'))
+    dp.message.register(rename_spectacle_save, StateFilter(RenameSpectacle.waiting_for_title))
 
     # employees callbacks
     dp.callback_query.register(employees_menu_router,  (F.data == 'emp:add') | F.data.startswith('emp:show:'))
@@ -104,7 +107,11 @@ def register(dp: Dispatcher):
     dp.callback_query.register(emp_busy_remove_start, F.data.startswith('empbusy:remove:'))
 
     # excel (scoped to FSM states to avoid collisions)
-    dp.message.register(handle_excel_upload, StateFilter(UploadExcel.waiting_for_file), F.document)
+    dp.message.register(
+        handle_excel_upload,
+        StateFilter(UploadExcel.waiting_for_file),
+        (F.document | F.photo)
+    )
     dp.callback_query.register(handle_excel_month_pick, StateFilter(UploadExcel.waiting_for_month), F.data.startswith('xlsmonth:'))
     dp.callback_query.register(handle_make_schedule_pick, F.data.startswith('mkmonth:'))
     dp.callback_query.register(publish_month_pick, F.data.startswith('pubmonth:'))

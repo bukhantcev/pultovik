@@ -11,6 +11,9 @@ from keyboards.inline import get_spectacles_inline_kb, get_edit_employees_inline
 class AddSpectacle(StatesGroup):
     waiting_for_name = State()
 
+class RenameSpectacle(StatesGroup):
+    waiting_for_title = State()
+
 async def handle_spectacles(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         await message.answer("Только для админа"); return
@@ -54,13 +57,23 @@ async def spectacles_menu_router(callback: CallbackQuery, state: FSMContext):
         )
         await callback.answer()
         return
+    if data.startswith(("edit_spectacle:", "editstart:", "spec:edit:")):
+        # Open inline list of employees with checkmarks for this spectacle
+        try:
+            sid = int(data.rsplit(":", 1)[-1])
+        except Exception:
+            await callback.answer("Ошибка формата", show_alert=True); return
+        await callback.message.answer("Изменение списка сотрудников:", reply_markup=get_edit_employees_inline_kb(sid))
+        await callback.answer()
+        return
     await callback.answer("Выберите спектакль из списка или '➕ Добавить'.", show_alert=True)
 
 async def edit_employees_start(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer("Только для админа", show_alert=True); return
+    data = (callback.data or "")
     try:
-        sid = int((callback.data or "").split(":", 1)[1])
+        sid = int(data.rsplit(":", 1)[-1])
     except Exception:
         await callback.answer("Ошибка формата", show_alert=True); return
     await callback.message.answer("Изменение списка сотрудников:", reply_markup=get_edit_employees_inline_kb(sid))
@@ -128,4 +141,64 @@ async def delete_spectacle(callback: CallbackQuery, state: FSMContext):
         con.execute("DELETE FROM spectacle_employees WHERE spectacle_id=?", (sid,))
         con.commit()
     await callback.message.answer(f"Спектакль «{title}» удалён.")
+    await callback.answer()
+
+async def rename_spectacle_start(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Только для админа", show_alert=True); return
+    try:
+        _, _, sid_s = (callback.data or "").split(":", 2)
+        sid = int(sid_s)
+    except Exception:
+        await callback.answer("Ошибка формата", show_alert=True); return
+
+    await state.update_data(rename_sid=sid)
+    await state.set_state(RenameSpectacle.waiting_for_title)
+    await callback.message.answer("Пришлите новое название спектакля", reply_markup=ReplyKeyboardRemove())
+    await callback.answer()
+
+async def rename_spectacle_save(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await message.answer("Только для админа"); return
+    data = await state.get_data()
+    sid = data.get("rename_sid")
+    new_title = (message.text or "").strip()
+    if not sid:
+        await message.answer("Не выбран спектакль. Откройте карточку ещё раз.");
+        await state.clear()
+        return
+    if not new_title:
+        await message.answer("Название пустое. Отправьте корректный текст.");
+        return
+
+    try:
+        with DBI._conn() as con:
+            con.execute("UPDATE spectacles SET title=? WHERE id=?", (new_title, int(sid)))
+            con.commit()
+    except Exception as e:
+        await message.answer("Ошибка при сохранении названия: " + str(e))
+        return
+
+    await state.clear()
+    await message.answer(f"Название обновлено: «{new_title}».")
+
+async def edit_spectacle_start(callback: CallbackQuery, state: FSMContext):
+    """Открыть клавиатуру редактирования сотрудников для выбранного спектакля.
+    Обрабатывает payload'ы вида: edit_spectacle:<sid> | editstart:<sid> | spec:edit:<sid>
+    """
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Только для админа", show_alert=True)
+        return
+    data = (callback.data or "")
+    try:
+        # sid всегда в конце после последнего ':'
+        sid = int(data.rsplit(":", 1)[-1])
+    except Exception:
+        await callback.answer("Ошибка формата", show_alert=True)
+        return
+
+    await callback.message.answer(
+        "Изменение списка сотрудников:",
+        reply_markup=get_edit_employees_inline_kb(sid)
+    )
     await callback.answer()
