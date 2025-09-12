@@ -20,7 +20,7 @@ def _is_admin(user_id: int | None) -> bool:
 
 def _after_25_for_non_admin(user_id: int | None) -> bool:
     try:
-        return (not _is_admin(user_id)) and date.today().day >= 30
+        return (not _is_admin(user_id)) and date.today().day >= 25
     except Exception:
         return False
 
