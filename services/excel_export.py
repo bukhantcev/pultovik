@@ -10,6 +10,7 @@ from openpyxl.styles import Alignment
 from openpyxl import load_workbook
 
 def _auto_width(ws, min_width: int = 10, max_width: int = 80, wrap: bool = False):
+
     """
     Auto-fit column widths by scanning headers + data (legacy helper).
     NOTE: The new logic below (_post_save_autofit) strictly follows the
@@ -45,63 +46,71 @@ def _post_save_autofit(xlsx_path: Path, sheet_name: str, *, min_width: int = 10,
     - Optional wrap + vertical top for all data cells
     - Row height = base_height * max_lines_in_that_row (approx), so multiline is readable
     """
-    wb = load_workbook(filename=str(xlsx_path))
-    ws = wb[sheet_name]
+    print("ok")
+    try:
+        wb = load_workbook(filename=str(xlsx_path))
+        ws = wb[sheet_name]
+        print(f"Обрабатываем лист: {sheet_name}, строк: {ws.max_row}, столбцов: {ws.max_column}")
 
-    header_cells = list(ws[1]) if ws.max_row >= 1 else []
-    n_cols = len(header_cells)
+        header_cells = list(ws[1]) if ws.max_row >= 1 else []
+        n_cols = len(header_cells)
 
-    # First pass: compute max line length per column and max line count per row
-    col_max_len: dict[int, int] = {c: 0 for c in range(1, n_cols + 1)}
-    row_max_lines: dict[int, int] = {}
+        # First pass: compute max line length per column and max line count per row
+        col_max_len: dict[int, int] = {c: 0 for c in range(1, n_cols + 1)}
+        row_max_lines: dict[int, int] = {}
 
-    for row_idx in range(2, ws.max_row + 1):
-        max_lines_in_row = 1
+        for row_idx in range(2, ws.max_row + 1):
+            max_lines_in_row = 1
+            for col_idx in range(1, n_cols + 1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                val = cell.value
+                if val is None:
+                    lines = [""]
+                else:
+                    s = str(val)
+                    # normalize Windows/mac newlines to '\n'
+                    s = s.replace("\r\n", "\n").replace("\r", "\n")
+                    lines = s.split("\n")
+
+                # longest visible line length in this cell
+                longest = 0
+                for line in lines:
+                    # consider multiple spaces and tabs visually wider
+                    l = len(line.expandtabs(4))
+                    if l > longest:
+                        longest = l
+
+                if longest > col_max_len[col_idx]:
+                    col_max_len[col_idx] = longest
+
+                if len(lines) > max_lines_in_row:
+                    max_lines_in_row = len(lines)
+
+                if wrap:
+                    cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+            row_max_lines[row_idx] = max_lines_in_row
+
+        # Second pass: set column widths
         for col_idx in range(1, n_cols + 1):
-            cell = ws.cell(row=row_idx, column=col_idx)
-            val = cell.value
-            if val is None:
-                lines = [""]
-            else:
-                s = str(val)
-                # normalize Windows/mac newlines to '\n'
-                s = s.replace("\r\n", "\n").replace("\r", "\n")
-                lines = s.split("\n")
+            # small scale factor to better approximate Excel width metrics
+            scaled = int(col_max_len[col_idx]) + 1
+            width = max(min_width, min(scaled, max_width))
+            letter = ws.cell(row=1, column=col_idx).column_letter if n_cols else None
+            if letter:
+                ws.column_dimensions[letter].width = width
 
-            # longest visible line length in this cell
-            longest = 0
-            for line in lines:
-                # consider multiple spaces and tabs visually wider
-                l = len(line.expandtabs(4))
-                if l > longest:
-                    longest = l
+        # Third pass: set row heights (approx)
+        base_height = 15  # Excel default row height is ~15 pt
+        for row_idx, lines in row_max_lines.items():
+            ws.row_dimensions[row_idx].height = base_height * max(1, lines)
 
-            if longest > col_max_len[col_idx]:
-                col_max_len[col_idx] = longest
+        wb.save(str(xlsx_path))
+        print("Автофит применён успешно")
+    except Exception as e:
+        print(f"Ошибка в _post_save_autofit: {e}")
+        raise
 
-            if len(lines) > max_lines_in_row:
-                max_lines_in_row = len(lines)
-
-            if wrap:
-                cell.alignment = Alignment(wrap_text=True, vertical="top")
-
-        row_max_lines[row_idx] = max_lines_in_row
-
-    # Second pass: set column widths
-    for col_idx in range(1, n_cols + 1):
-        # small scale factor to better approximate Excel width metrics
-        scaled = int(col_max_len[col_idx] * 1.2) + 2
-        width = max(min_width, min(scaled, max_width))
-        letter = ws.cell(row=1, column=col_idx).column_letter if n_cols else None
-        if letter:
-            ws.column_dimensions[letter].width = width
-
-    # Third pass: set row heights (approx)
-    base_height = 15  # Excel default row height is ~15 pt
-    for row_idx, lines in row_max_lines.items():
-        ws.row_dimensions[row_idx].height = base_height * max(1, lines)
-
-    wb.save(str(xlsx_path))
 
 def export_month_schedule(year: int, month: int) -> tuple[Path, int]:
     prefix = f"{year:04d}-{month:02d}-"
@@ -158,16 +167,15 @@ def export_spectacles_table() -> tuple[Path, int]:
     })
     # Make employees appear one per line for better readability and wrapping
     df["Сотрудники"] = df["Сотрудники"].astype(str).str.replace(", ", "\n")
-
     out_path = Path(tempfile.gettempdir()) / "Спектакли_и_кто_ведёт.xlsx"
     with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
         sheet_name = "Спектакли"
         df.to_excel(writer, index=False, sheet_name=sheet_name)
 
     # Post-save auto-fit strictly by content (headers ignored)
-    _post_save_autofit(out_path, sheet_name, min_width=20, max_width=120, wrap=True)
+    _post_save_autofit(out_path, sheet_name, min_width=10, max_width=80, wrap=True)
 
-    return out_path, len(df)
+    return out_path
 
 
 def spectacles_caption(total: int) -> str:

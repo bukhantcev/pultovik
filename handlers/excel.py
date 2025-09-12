@@ -10,7 +10,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import is_admin, RU_MONTHS
 from keyboards.inline import get_month_pick_inline, get_edit_employees_inline_kb
 from services.excel_import import import_events_from_excel
-from services.excel_export import export_month_schedule, file_as_input, month_caption
+from services.excel_export import export_month_schedule, file_as_input, month_caption, export_spectacles_table
 from services.auto_assign import auto_assign_events_for_month
 from services.google_sheets import publish_schedule_to_sheets
 from db import DBI
@@ -311,39 +311,21 @@ async def view_schedule_pick(callback: CallbackQuery, state: FSMContext):
 async def spectacles_table_export(message: Message, state: FSMContext):
     """
     Админская команда: выгрузка таблицы «Спектакли — назначенные сотрудники».
+    Генерация идёт через services.excel_export.export_spectacles_table().
     """
     if not is_admin(message.from_user.id):
         return
 
-    # Собираем данные: по каждому спектаклю список назначенных сотрудников
-    titles = DBI.list_spectacles()
-    rows = []
-    for title in titles:
-        emps = DBI.get_spectacle_employees(title)  # список display-имён
-        rows.append({
-            "Название": title,
-            "Сотрудники": ", ".join(emps) if emps else ""
-        })
-
-    # Если спектаклей нет — краткий ответ без файла
-    if not rows:
-        await message.answer("В базе пока нет спектаклей.")
-        return
-
-    # Готовим XLSX во временный файл
-    df = pd.DataFrame(rows, columns=["Название", "Сотрудники"])
-    out_path = Path(tempfile.gettempdir()) / "Спектакли.xlsx"
     try:
-        df.to_excel(out_path, index=False)
+        xlsx_path = export_spectacles_table()
     except Exception as e:
         await message.answer(f"Не удалось сформировать XLSX: {e}")
         return
 
-    # Отправляем файл
     try:
         await message.answer_document(
-            file_as_input(out_path),
-            caption=f"Всего спектаклей: {len(rows)}"
+            file_as_input(xlsx_path),
+            caption="Таблица спектаклей и сотрудников"
         )
     except Exception as e:
         await message.answer(f"Не удалось отправить файл: {e}")
