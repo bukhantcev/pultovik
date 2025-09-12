@@ -79,6 +79,11 @@ class DB:
                     info TEXT
                 )
             """)
+            # MIGRATION: Add duty_employee column if not exists
+            cur.execute("PRAGMA table_info(events)")
+            columns = [row[1] for row in cur.fetchall()]
+            if "duty_employee" not in columns:
+                cur.execute("ALTER TABLE events ADD COLUMN duty_employee TEXT")
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS pending_auth (
@@ -337,11 +342,45 @@ class DB:
     def insert_events(self, rows: list[dict]):
         if not rows:
             return
+        # Ensure duty_employee key present in every row
+        for row in rows:
+            if "duty_employee" not in row:
+                row["duty_employee"] = None
         with self._conn() as con:
             con.executemany("""
-                INSERT INTO events(date, type, title, time, location, city, employee, info)
-                VALUES(:date, :type, :title, :time, :location, :city, :employee, :info)
+                INSERT INTO events(date, type, title, time, location, city, employee, info, duty_employee)
+                VALUES(:date, :type, :title, :time, :location, :city, :employee, :info, :duty_employee)
             """, rows)
+            con.commit()
+
+    def get_employee_display_by_id(self, employee_id: int) -> str | None:
+        with self._conn() as con:
+            row = con.execute("SELECT display FROM employees WHERE id=?", (employee_id,)).fetchone()
+            return row[0] if row else None
+
+    def count_duty_for_month(self, employee_id: int, year: int, month: int) -> int:
+        """Count events in the given month where duty_employee is this employee's display name."""
+        prefix = f"{year:04d}-{month:02d}-"
+        display = self.get_employee_display_by_id(employee_id)
+        if not display:
+            return 0
+        with self._conn() as con:
+            row = con.execute(
+                "SELECT COUNT(*) FROM events WHERE duty_employee=? AND date LIKE ?",
+                (display, prefix + "%")
+            ).fetchone()
+            return int(row[0] if row and row[0] is not None else 0)
+
+    def update_event_duty_by_ids(self, event_ids: list[int], employee_id: int) -> None:
+        """Set duty_employee for all given event ids to the employee's display name."""
+        display = self.get_employee_display_by_id(employee_id)
+        if not display or not event_ids:
+            return
+        with self._conn() as con:
+            con.executemany(
+                "UPDATE events SET duty_employee=? WHERE id=?",
+                [(display, eid) for eid in event_ids]
+            )
             con.commit()
 
 DBI = DB(DB_PATH)

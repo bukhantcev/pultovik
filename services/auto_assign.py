@@ -3,6 +3,7 @@ from config import ADMIN_ID, RU_MONTHS
 from aiogram import Bot
 import os
 import asyncio
+import calendar
 # services/auto_assign.py
 from db import DBI
 
@@ -71,6 +72,126 @@ def _update_event_employee_literal(event_ids: list[int], value: str):
             con.execute("UPDATE events SET employee=? WHERE id=?", (value, eid))
         con.commit()
 
+def _all_employee_ids() -> list[int]:
+    with DBI._conn() as con:
+        rows = con.execute("SELECT id FROM employees ORDER BY last_name, first_name").fetchall()
+        return [r[0] for r in rows]
+
+def _employee_display_by_id(employee_id: int) -> str | None:
+    with DBI._conn() as con:
+        row = con.execute("SELECT display FROM employees WHERE id=?", (employee_id,)).fetchone()
+        return row[0] if row else None
+
+def _count_duty_for_month(employee_id: int, year: int, month: int) -> int:
+    prefix = f"{year:04d}-{month:02d}-"
+    with DBI._conn() as con:
+        row = con.execute(
+            "SELECT COUNT(*) FROM events WHERE duty_employee IS NOT NULL AND duty_employee <> '' AND duty_employee IN (SELECT display FROM employees WHERE id=?) AND date LIKE ?",
+            (employee_id, prefix + '%'),
+        ).fetchone()
+        return int(row[0] if row and row[0] is not None else 0)
+
+def _assigned_main_set_for_date(date_str: str) -> set[int]:
+    """Возвращает множество id сотрудников, назначенных в поле employee на заданную дату."""
+    with DBI._conn() as con:
+        rows = con.execute(
+            "SELECT DISTINCT e.id FROM events ev JOIN employees e ON e.display = ev.employee WHERE ev.date=?",
+            (date_str,),
+        ).fetchall()
+        return {r[0] for r in rows}
+
+def _set_duty_for_date(date_str: str, duty_display: str) -> int:
+    """Ставит (или обновляет) дежурного на дату. Если событий нет — добавляет пустую запись дня.
+    Возвращает число обновлённых/вставленных строк events."""
+    updated = 0
+    with DBI._conn() as con:
+        cur = con.execute("UPDATE events SET duty_employee=? WHERE date=?", (duty_display, date_str))
+        updated += cur.rowcount
+        if updated == 0:
+            # Нет событий в этот день — создаём отдельную запись дня
+            con.execute(
+                "INSERT INTO events(date, type, title, time, location, city, employee, info, duty_employee) VALUES(?,?,?,?,?,?,?,?,?)",
+                (date_str, None, None, None, None, None, None, None, duty_display),
+            )
+            updated = 1
+        con.commit()
+    return updated
+
+def _set_duty_literal(date_str: str, value: str) -> int:
+    """Ставит буквальный текст в duty_employee на дату (или создаёт пустую запись дня)."""
+    updated = 0
+    with DBI._conn() as con:
+        cur = con.execute("UPDATE events SET duty_employee=? WHERE date=?", (value, date_str))
+        updated += cur.rowcount
+        if updated == 0:
+            con.execute(
+                "INSERT INTO events(date, type, title, time, location, city, employee, info, duty_employee) VALUES(?,?,?,?,?,?,?,?,?)",
+                (date_str, None, None, None, None, None, None, None, value),
+            )
+            updated = 1
+        con.commit()
+    return updated
+
+def _pick_duty_for_date(date_str: str, candidate_ids: list[int], busy_map: dict[int, set[str]], forbidden_ids: set[int], year: int, month: int, prefer_not: int | None = None) -> int | None:
+    """Выбираем дежурного на дату с учётом занятости и баланса (минимум рабочих дней = employee+дюти).
+    forbidden_ids — те, кто уже назначен в employee в этот день (должны отличаться)."""
+    # Отфильтровать занятых и запрещённых
+    pool = []
+    for eid in candidate_ids:
+        if eid in forbidden_ids:
+            continue
+        if date_str in busy_map.get(eid, set()):
+            continue
+        pool.append(eid)
+    if not pool:
+        return None
+    # Баланс: считаем employee + duty за месяц
+    scored = []
+    for eid in pool:
+        main_cnt = DBI.count_assigned_for_month(eid, year, month)
+        duty_cnt = _count_duty_for_month(eid, year, month)
+        scored.append((main_cnt + duty_cnt, eid))
+    scored.sort()
+    # Избегаем подряд того же дежурного, если есть альтернатива
+    if prefer_not is not None and len(scored) > 1 and scored[0][1] == prefer_not:
+        # найдём первого, кто не равен prefer_not
+        for _, cand in scored:
+            if cand != prefer_not:
+                return cand
+    return scored[0][1] if scored else None
+
+def assign_duty_for_month(year: int, month: int) -> int:
+    """Назначает дежурного сотрудника на КАЖДЫЙ день месяца.
+    Правила:
+      - дежурный ≠ любой из назначенных по employee в этот день;
+      - учитывать занятость (employee_busy);
+      - не зависит от спектаклей/связок;
+      - балансировать суммарные рабочие дни за месяц (employee + дежурства).
+    Возвращает число затронутых строк events."""
+    # Подготовим пул кандидатов и карту занятости
+    all_ids = _all_employee_ids()
+    busy_map = {eid: set(DBI.list_busy_dates(eid)) for eid in all_ids}
+
+    total_updated = 0
+    days_in_month = calendar.monthrange(year, month)[1]
+    last_duty_id: int | None = None
+    for d in range(1, days_in_month + 1):
+        date_str = f"{year:04d}-{month:02d}-{d:02d}"
+        forbidden = _assigned_main_set_for_date(date_str)
+        eid = _pick_duty_for_date(date_str, all_ids, busy_map, forbidden, year, month, prefer_not=last_duty_id)
+        if eid is None:
+            # Полная недоступность — фиксируем «НАКЛАДКА!!!» в duty_employee
+            total_updated += _set_duty_literal(date_str, "НАКЛАДКА!!!")
+            last_duty_id = None
+            continue
+        disp = _employee_display_by_id(eid)
+        if not disp:
+            last_duty_id = None
+            continue
+        total_updated += _set_duty_for_date(date_str, disp)
+        last_duty_id = eid
+    return total_updated
+
 async def _notify_admin_summary(text: str):
     token = os.getenv("BOT_TOKEN")
     if not (token and ADMIN_ID):
@@ -135,25 +256,40 @@ def auto_assign_events_for_month(year: int | None = None, month: int | None = No
         busy_map.setdefault(eid, set()).add(date)
         if (city or '').strip().lower() == 'москва':
             last_moscow[title] = eid
-    # Подготовка отчета по загруженности сотрудников
-    summary: dict[int, int] = {}
-    for eid in all_emp_ids:
-        cnt = DBI.count_assigned_for_month(eid, year, month) if year and month else 0
-        if cnt > 0:
-            summary[eid] = cnt
+    # Подготовка отчёта по загруженности: исполнители + дежурства
+    summary: dict[int, tuple[int,int]] = {}
+    # Соберём всех сотрудников, участвовавших в этом месяце (по связям спектаклей) — или всех, если хочется полный отчёт
+    all_emp_ids_for_report = _all_employee_ids()
+    if year and month:
+        for eid in all_emp_ids_for_report:
+            main_cnt = DBI.count_assigned_for_month(eid, year, month)
+            duty_cnt = _count_duty_for_month(eid, year, month)
+            if (main_cnt + duty_cnt) > 0:
+                summary[eid] = (main_cnt, duty_cnt)
 
     if summary and year and month:
         month_title = f"{RU_MONTHS[month-1]} {year}"
         lines = [month_title]
-        # Сортируем по фамилии для читабельности
         items = []
-        for eid, cnt in summary.items():
-            row = DBI._conn().execute("SELECT first_name, last_name FROM employees WHERE id=?", (eid,)).fetchone()
-            if row:
-                fn, ln = row
-                items.append((ln or "", fn or "", cnt))
-        for ln, fn, cnt in sorted(items):
-            lines.append(f"{ln} {fn} — {cnt}")
+        with DBI._conn() as con:
+            for eid, (main_cnt, duty_cnt) in summary.items():
+                row = con.execute("SELECT last_name, first_name FROM employees WHERE id=?", (eid,)).fetchone()
+                if row:
+                    ln, fn = row
+                    items.append((ln or "", fn or "", main_cnt, duty_cnt))
+        for ln, fn, main_cnt, duty_cnt in sorted(items):
+            total = main_cnt + duty_cnt
+            lines.append(f"{ln} {fn} — {total} (дежурств: {duty_cnt})")
         text = "\n".join(lines)
         asyncio.create_task(_notify_admin_summary(text))
+
+    # После назначения исполнителей — назначим дежурных на каждый день выбранного месяца
+    if year and month:
+        try:
+            duty_updated = assign_duty_for_month(year, month)
+            updated += duty_updated
+        except Exception as _e:
+            # не валим общий процесс, просто логируем
+            print("assign_duty_for_month failed:", _e)
+
     return updated

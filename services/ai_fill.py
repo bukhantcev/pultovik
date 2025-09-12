@@ -49,7 +49,7 @@ async def describe_image(path: Path) -> str:
 
 
 # --- helpers and build_excel_from_file ---
-CSV_HEADERS = ["Дата", "Тип", "Название", "Время", "Локация", "Город", "Сотрудник", "Инфо"]
+CSV_HEADERS = ["Дата", "Тип", "Название", "Время", "Локация", "Город", "Сотрудник", "Дежурный сотрудник", "Инфо"]
 
 
 def _to_data_url(path: Path) -> str:
@@ -183,7 +183,7 @@ def _normalize_csv(csv_text: str) -> list[list[str]]:
                 ordered.append(row)
         else:
             # Пустой день: создаём строку только с датой
-            ordered.append([_human_ru_date(dd), "", "", "", "", "", "", ""])
+            ordered.append([_human_ru_date(dd), "", "", "", "", "", "", "", ""])
 
     return [CSV_HEADERS] + ordered
 
@@ -206,7 +206,7 @@ def _rows_to_xlsx(rows: list[list[str]], out_path: Path) -> None:
             cell.alignment = Alignment(vertical='center')
 
     # ширины столбцов
-    widths = [14, 12, 34, 10, 18, 14, 14, 30]
+    widths = [14, 12, 34, 10, 18, 14, 18, 18, 30]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[chr(64 + i)].width = w
 
@@ -218,7 +218,12 @@ async def build_excel_from_file(path: Path) -> FSInputFile:
     Отправляет файл (фото/PDF/таблица) в GPT и собирает .xlsx по нашему шаблону.
     Гарантирует, что ВСЕ дни месяца присутствуют, а последняя строка не теряется.
     """
-    instructions = SYSTEM_PROMPT
+    instructions = (
+        SYSTEM_PROMPT
+        + "\n\nСтрого верни CSV с заголовками ровно в таком порядке: "
+        + ", ".join(CSV_HEADERS)
+        + ". Никаких комментариев, пояснений и блоков кода. Только CSV."
+    )
 
     ext = (path.suffix or '').lower()
     if ext in {'.jpg', '.jpeg', '.png', '.webp'}:
@@ -264,8 +269,10 @@ async def build_excel_from_site(raw_text: str, month: int, year: int, tmp_name: 
         + "\n\n"
         + f"Работай строго для месяца: {month:02d}.{year} (все даты этого периода). "
           "Если в тексте отсутствуют некоторые дни, всё равно формируй строки для этих дней с пустыми полями кроме даты. "
-          "Основная сцена - это Поварская, город Москва"
-          "Верни ТОЛЬКО CSV (UTF-8) без пояснений и без блоков кода."
+          "Основная сцена - это Поварская, город Москва. "
+        + "Строго верни CSV (UTF-8) с заголовками ровно в таком порядке: "
+        + ", ".join(CSV_HEADERS)
+        + ". Никаких комментариев и без блоков кода."
     )
 
     resp = client.responses.create(
