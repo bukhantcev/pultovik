@@ -306,3 +306,44 @@ async def view_schedule_pick(callback: CallbackQuery, state: FSMContext):
         )
 
     await callback.answer("Готово")
+
+@router.message(F.text == "Спектакли (таблица)")
+async def spectacles_table_export(message: Message, state: FSMContext):
+    """
+    Админская команда: выгрузка таблицы «Спектакли — назначенные сотрудники».
+    """
+    if not is_admin(message.from_user.id):
+        return
+
+    # Собираем данные: по каждому спектаклю список назначенных сотрудников
+    titles = DBI.list_spectacles()
+    rows = []
+    for title in titles:
+        emps = DBI.get_spectacle_employees(title)  # список display-имён
+        rows.append({
+            "Название": title,
+            "Сотрудники": ", ".join(emps) if emps else ""
+        })
+
+    # Если спектаклей нет — краткий ответ без файла
+    if not rows:
+        await message.answer("В базе пока нет спектаклей.")
+        return
+
+    # Готовим XLSX во временный файл
+    df = pd.DataFrame(rows, columns=["Название", "Сотрудники"])
+    out_path = Path(tempfile.gettempdir()) / "Спектакли.xlsx"
+    try:
+        df.to_excel(out_path, index=False)
+    except Exception as e:
+        await message.answer(f"Не удалось сформировать XLSX: {e}")
+        return
+
+    # Отправляем файл
+    try:
+        await message.answer_document(
+            file_as_input(out_path),
+            caption=f"Всего спектаклей: {len(rows)}"
+        )
+    except Exception as e:
+        await message.answer(f"Не удалось отправить файл: {e}")

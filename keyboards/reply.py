@@ -12,12 +12,13 @@ def get_user_busy_reply_kb(user_id: int) -> ReplyKeyboardMarkup:
     if is_admin(user_id):
         base_rows = [
             [KeyboardButton(text="Спектакли"), KeyboardButton(text="Сотрудники")],
+            [KeyboardButton(text="AI заполнить шаблон")],
+            [KeyboardButton(text="Импорт расписания")],
             [KeyboardButton(text="Сделать график")],
             [KeyboardButton(text="Опубликовать")],
-            [KeyboardButton(text="Импорт расписания")]
+            [KeyboardButton(text="Спектакли (таблица)")]
         ]
-        if ENABLE_AI_FILL:
-            base_rows.append([KeyboardButton(text="AI заполнить шаблон")])
+
     # Always show 'Посмотреть расписание' button for everyone
     base_rows.append([KeyboardButton(text="Посмотреть расписание")])
 

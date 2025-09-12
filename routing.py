@@ -23,10 +23,12 @@ from handlers.excel import (
     publish_start,
     publish_month_pick,
 )
+from handlers import excel
 from handlers.admin import handle_auto_assign, auth_list_employees, auth_approve, auth_deny, auth_new_start, auth_new_last_name, auth_new_first_name, NewAuthEmployee
 from handlers.ai_fill import ai_fill_start, ai_fill_receive, ai_fill_cancel, AIFillStates, ai_fill_site_start, ai_fill_site_pick
 
 def register(dp: Dispatcher):
+    dp.include_router(excel.router)
     # base
     dp.message.register(cmd_start, CommandStart())
 
