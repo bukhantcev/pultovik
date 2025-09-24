@@ -7,6 +7,63 @@ from typing import Optional, Tuple
 
 import pandas as pd
 
+# -------------------------
+# Нормализация DataFrame расписания
+# -------------------------
+_EXPECTED_ORDER = [
+    "Дата",
+    "Тип",
+    "Название",
+    "Время",
+    "Локация",
+    "Город",
+    "Сотрудник",
+    "Дежурный сотрудник",
+    "Инфо",
+]
+
+# Возможные внутренние названия -> русские заголовки
+_CANON_MAP = {
+    "date": "Дата",
+    "type": "Тип",
+    "title": "Название",
+    "time": "Время",
+    "location": "Локация",
+    "city": "Город",
+    "employee": "Сотрудник",
+    "duty_employee": "Дежурный сотрудник",
+    "info": "Инфо",
+}
+
+def _normalize_schedule_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Приводит колонки к ожидаемым русским заголовкам и гарантирует наличие
+    столбца «Дежурный сотрудник». Также старается сохранить порядок.
+    """
+    if df is None or df.empty:
+        # даже для пустого — вернём каркас с нужными заголовками
+        return pd.DataFrame(columns=_EXPECTED_ORDER)
+
+    # 1) Попробовать переименовать известные внутренние имена -> русские
+    rename_map = {}
+    lower_to_col = {str(c).strip().lower(): c for c in df.columns}
+    for k_lower, ru in _CANON_MAP.items():
+        if k_lower in lower_to_col:
+            rename_map[ lower_to_col[k_lower] ] = ru
+
+    df2 = df.rename(columns=rename_map)
+
+    # 2) Гарантировать наличие столбца «Дежурный сотрудник»
+    if "Дежурный сотрудник" not in df2.columns:
+        df2["Дежурный сотрудник"] = ""
+
+    # 3) Собрать финальный порядок: сначала ожидаемые, затем остальные
+    ordered_cols = [c for c in _EXPECTED_ORDER if c in df2.columns]
+    tail_cols = [c for c in df2.columns if c not in ordered_cols]
+    df2 = df2[ordered_cols + tail_cols]
+
+    return df2
+
 # gspread + creds
 import gspread
 from google.oauth2.service_account import Credentials
@@ -128,6 +185,9 @@ def publish_schedule_to_sheets(year: int, month: int, df: pd.DataFrame, sheet_id
     """
     title = month_title_ru(year, month)
     spreadsheet_id = sheet_id or _resolve_spreadsheet_id()
+
+    # Нормализуем DF, чтобы точно была колонка «Дежурный сотрудник»
+    df = _normalize_schedule_df(df)
 
     gc = get_gspread_client()
     sh = gc.open_by_key(spreadsheet_id)
