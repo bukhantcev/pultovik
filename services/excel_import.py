@@ -13,6 +13,8 @@ EXPECTED_EVENT_COLUMNS = {
     'локация': 'location',
     'город': 'city',
     'сотрудник': 'employee',
+    'дежурный сотрудник': 'duty_employee',
+    'дежурный': 'duty_employee',
     'инфо': 'info',
 }
 
@@ -37,7 +39,7 @@ def import_events_from_excel(path: Path, year: int, month: int) -> tuple[int, in
     df = _normalize_event_columns(df)
     if 'date' not in df.columns:
         raise ValueError("В Excel нет колонки 'Дата'")
-    keep = ['date','type','title','time','location','city','employee','info']
+    keep = ['date','type','title','time','location','city','employee','duty_employee','info']
     for k in keep:
         if k not in df.columns:
             df[k] = None
@@ -88,6 +90,7 @@ def import_events_from_excel(path: Path, year: int, month: int) -> tuple[int, in
             'location': None if pd.isna(r['location']) else str(r['location']),
             'city': None if pd.isna(r['city']) else str(r['city']),
             'employee': None if pd.isna(r['employee']) else str(r['employee']),
+            'duty_employee': None if pd.isna(r['duty_employee']) else str(r['duty_employee']),
             'info': None if pd.isna(r['info']) else str(r['info']),
         })
 

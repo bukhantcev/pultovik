@@ -47,9 +47,17 @@ def _normalize_schedule_df(df: pd.DataFrame) -> pd.DataFrame:
     # 1) Попробовать переименовать известные внутренние имена -> русские
     rename_map = {}
     lower_to_col = {str(c).strip().lower(): c for c in df.columns}
+
+    # Вариант 1: внутренние имена -> русские заголовки
     for k_lower, ru in _CANON_MAP.items():
         if k_lower in lower_to_col:
-            rename_map[ lower_to_col[k_lower] ] = ru
+            rename_map[lower_to_col[k_lower]] = ru
+
+    # Вариант 2: русские алиасы -> канонический русский заголовок
+    # Поддержим «Дежурный сотрудник» и короткий «Дежурный»
+    for alias in ("дежурный сотрудник", "дежурный"):
+        if alias in lower_to_col and "Дежурный сотрудник" not in rename_map.values():
+            rename_map[lower_to_col[alias]] = "Дежурный сотрудник"
 
     df2 = df.rename(columns=rename_map)
 
