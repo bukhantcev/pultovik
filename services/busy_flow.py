@@ -75,43 +75,50 @@ async def monthly_reminders_task(bot):
     for the *next* month (the same logic we use elsewhere).
     Runs forever, sleeping ~1 hour between checks.
     """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
     global _last_reminder_stamp
     while True:
         try:
-            today = date.today()
-            # Fire only on 12th or 24th and only once per calendar day
-            if today.day in (12, 24):
-                stamp = (today.year, today.month, today.day)
-                if _last_reminder_stamp != stamp:
-                    # Next month/year & name (e.g., "Октябрь")
-                    next_m, next_y, mname = next_month_and_year(today)
+            now = datetime.now(ZoneInfo("Europe/Moscow"))
 
-                    # Who hasn't submitted yet for next month
-                    to_notify = []
-                    try:
-                        rows = DBI.list_employees_with_tg()  # [(id, display, tg_id_int)]
-                        for eid, disp, tg in rows:
-                            try:
-                                if not DBI.has_submitted(eid, next_y, next_m):
-                                    to_notify.append((eid, disp, tg))
-                            except Exception:
-                                continue
-                    except Exception:
-                        rows = []
+            # Run reminder exactly at 12:00 Moscow time
+            if now.hour == 12 and now.minute == 0:
+                today = now.date()
+                # Fire only on 12th or 24th and only once per calendar day
+                if today.day in (12, 24):
+                    stamp = (today.year, today.month, today.day)
+                    if _last_reminder_stamp != stamp:
+                        # Next month/year & name (e.g., "Октябрь")
+                        next_m, next_y, mname = next_month_and_year(today)
+
+                        # Who hasn't submitted yet for next month
                         to_notify = []
+                        try:
+                            rows = DBI.list_employees_with_tg()  # [(id, display, tg_id_int)]
+                            for eid, disp, tg in rows:
+                                try:
+                                    if not DBI.has_submitted(eid, next_y, next_m):
+                                        to_notify.append((eid, disp, tg))
+                                except Exception:
+                                    continue
+                        except Exception:
+                            rows = []
+                            to_notify = []
 
-                    if to_notify:
-                        # Day-specific phrasing
-                        suffix = " Сегодня последний день!" if today.day == 24 else ""
-                        for _, disp, tg in to_notify:
-                            try:
-                                text = f"{disp}, напомню: пришлите занятые даты за {mname} до 25 числа.{suffix}"
-                                await bot.send_message(tg, text)
-                            except Exception:
-                                # ignore individual delivery errors
-                                pass
+                        if to_notify:
+                            # Day-specific phrasing
+                            suffix = " Сегодня последний день!" if today.day == 24 else ""
+                            for _, disp, tg in to_notify:
+                                try:
+                                    text = f"{disp}, напомню: пришлите занятые даты за {mname} до 25 числа.{suffix}"
+                                    await bot.send_message(tg, text)
+                                except Exception:
+                                    # ignore individual delivery errors
+                                    pass
 
-                    _last_reminder_stamp = stamp
+                        _last_reminder_stamp = stamp
         except Exception:
             # swallow errors to keep the task alive
             pass
