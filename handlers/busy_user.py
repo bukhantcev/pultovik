@@ -8,8 +8,10 @@ from db import DBI
 from utils.dates import next_month_and_year, parse_days_for_month, format_busy_dates_for_month, human_ru_date
 from services.busy_flow import ensure_known_user_or_report_message, notify_admin_busy_change
 from datetime import date
+import datetime
 from config import ADMIN_ID
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.exceptions import TelegramBadRequest
 
 class BusyInput(StatesGroup):
     waiting_for_add_user = State()
@@ -24,6 +26,23 @@ def _after_25_for_non_admin(user_id: int | None) -> bool:
     except Exception:
         return False
 
+
+# --- Month navigation helpers ---
+def _add_months(year: int, month: int, delta: int) -> tuple[int, int]:
+    y, m = year, month
+    m += delta
+    while m <= 0:
+        m += 12
+        y -= 1
+    while m > 12:
+        m -= 12
+        y += 1
+    return y, m
+
+
+def _month_title(year: int, month: int) -> str:
+    return f"{month:02d}.{year}"
+
 async def busy_submit_text(message: Message, state: FSMContext):
     eid = await ensure_known_user_or_report_message(message)
     if eid is None: return
@@ -36,14 +55,28 @@ async def busy_submit_text(message: Message, state: FSMContext):
 
 async def busy_view_text(message: Message, state: FSMContext):
     eid = await ensure_known_user_or_report_message(message)
-    if eid is None: return
-    dates = DBI.list_busy_dates(eid)
+    if eid is None:
+        return
+
+    today = datetime.date.today()
+    view_year, view_month = today.year, today.month
+    prefix = f"{view_year:04d}-{view_month:02d}-"
+
+    dates = [d for d in DBI.list_busy_dates(eid) if d.startswith(prefix)]
     txt = "\n".join(human_ru_date(d) for d in dates) if dates else "пусто"
+
     kb = InlineKeyboardBuilder()
+    py, pm = _add_months(view_year, view_month, -1)
+    ny, nm = _add_months(view_year, view_month, +1)
+    kb.button(text="◀️ пред", callback_data=f"busy:view:{py:04d}-{pm:02d}")
+    kb.button(text="текущий", callback_data=f"busy:view:{today.year:04d}-{today.month:02d}")
+    kb.button(text="след ▶️", callback_data=f"busy:view:{ny:04d}-{nm:02d}")
     kb.button(text="➕ Добавить", callback_data="busy:add")
     kb.button(text="➖ Убрать", callback_data="busy:remove")
-    kb.adjust(2)
-    await message.answer(f"Ваши даты:\n{txt}", reply_markup=kb.as_markup())
+    kb.adjust(3, 2)
+
+    title = _month_title(view_year, view_month)
+    await message.answer(f"{title}\nВаши даты:\n{txt}", reply_markup=kb.as_markup())
 
 async def busy_submit(callback: CallbackQuery, state: FSMContext):
     row = DBI.get_employee_by_tg(callback.from_user.id)
@@ -63,15 +96,44 @@ async def busy_view(callback: CallbackQuery, state: FSMContext):
     row = DBI.get_employee_by_tg(callback.from_user.id)
     if not row:
         await callback.message.answer("Неизвестный пользователь. Администратор сопоставит ваш аккаунт.")
-        await callback.answer(); return
+        await callback.answer()
+        return
+
     eid = row[0]
-    dates = DBI.list_busy_dates(eid)
+
+    # callback_data formats:
+    #   busy:view
+    #   busy:view:YYYY-MM
+    parts = (callback.data or "").split(":")
+    today = datetime.date.today()
+    view_year, view_month = today.year, today.month
+    if len(parts) >= 3 and parts[2]:
+        try:
+            view_year = int(parts[2][0:4])
+            view_month = int(parts[2][5:7])
+        except Exception:
+            view_year, view_month = today.year, today.month
+
+    prefix = f"{view_year:04d}-{view_month:02d}-"
+    dates = [d for d in DBI.list_busy_dates(eid) if d.startswith(prefix)]
     txt = "\n".join(human_ru_date(d) for d in dates) if dates else "пусто"
+
     kb = InlineKeyboardBuilder()
+    py, pm = _add_months(view_year, view_month, -1)
+    ny, nm = _add_months(view_year, view_month, +1)
+    kb.button(text="◀️ пред", callback_data=f"busy:view:{py:04d}-{pm:02d}")
+    kb.button(text="текущий", callback_data=f"busy:view:{today.year:04d}-{today.month:02d}")
+    kb.button(text="след ▶️", callback_data=f"busy:view:{ny:04d}-{nm:02d}")
     kb.button(text="➕ Добавить", callback_data="busy:add")
     kb.button(text="➖ Убрать", callback_data="busy:remove")
-    kb.adjust(2)
-    await callback.message.answer(f"Ваши даты:\n{txt}", reply_markup=kb.as_markup())
+    kb.adjust(3, 2)
+
+    title = _month_title(view_year, view_month)
+    try:
+        await callback.message.edit_text(f"{title}\nВаши даты:\n{txt}", reply_markup=kb.as_markup())
+    except TelegramBadRequest:
+        # если сообщение нельзя отредактировать — отправим новое
+        await callback.message.answer(f"{title}\nВаши даты:\n{txt}", reply_markup=kb.as_markup())
     await callback.answer()
 
 async def handle_busy_add_text(message: Message, state: FSMContext):

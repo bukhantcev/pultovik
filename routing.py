@@ -95,7 +95,7 @@ def register(dp: Dispatcher):
 
     # busy (user)
     dp.callback_query.register(busy_submit, F.data == 'busy:submit')
-    dp.callback_query.register(busy_view,   F.data == 'busy:view')
+    dp.callback_query.register(busy_view,   F.data.startswith('busy:view'))
     dp.callback_query.register(busy_add,    F.data == 'busy:add')
     dp.callback_query.register(busy_remove, F.data == 'busy:remove')
     dp.message.register(busy_submit_text, F.text.regexp(r"^Подать даты за "))
@@ -104,9 +104,14 @@ def register(dp: Dispatcher):
     dp.message.register(handle_busy_remove_text, StateFilter(BusyInput.waiting_for_remove_user))
 
     # admin busy per-employee
+    dp.callback_query.register(emp_busy_view,         F.data.startswith('empbusy:view:'))
     dp.callback_query.register(emp_busy_view,         F.data.startswith('emp:busy:view:'))
+
     dp.callback_query.register(emp_busy_add_start,    F.data.startswith('empbusy:add:'))
+    dp.callback_query.register(emp_busy_add_start,    F.data.startswith('emp:busy:add:'))
+
     dp.callback_query.register(emp_busy_remove_start, F.data.startswith('empbusy:remove:'))
+    dp.callback_query.register(emp_busy_remove_start, F.data.startswith('emp:busy:remove:'))
 
     # excel (scoped to FSM states to avoid collisions)
     dp.message.register(
