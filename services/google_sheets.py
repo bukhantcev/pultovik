@@ -228,3 +228,152 @@ def publish_schedule_to_sheets(year: int, month: int, df: pd.DataFrame, sheet_id
         pass
 
     return sh.url, title
+
+
+# -------------------------
+# Чтение расписания на определённую дату
+# -------------------------
+
+def fetch_schedule_for_date(day, sheet_id: Optional[str] = None) -> str:
+    """Читает расписание на конкретную дату из Google Sheets.
+
+    Использует тот же Spreadsheet, что и publish_schedule_to_sheets:
+    - ID берётся из env (через _resolve_spreadsheet_id) или аргументом sheet_id.
+    - Название листа берётся через month_title_ru(day.year, day.month), т.е. "Сентябрь 2025".
+
+    Ожидаемый формат листа:
+      - первая строка: заголовки
+      - есть колонка "Дата" (если нет — берём первую колонку)
+    """
+    from datetime import date as _date
+
+    if not isinstance(day, _date):
+        raise TypeError("day must be datetime.date")
+
+    spreadsheet_id = sheet_id or _resolve_spreadsheet_id()
+    title = month_title_ru(day.year, day.month)
+
+    gc = get_gspread_client()
+    sh = gc.open_by_key(spreadsheet_id)
+
+    try:
+        ws = sh.worksheet(title)
+    except gspread.exceptions.WorksheetNotFound:
+        return f"{day.strftime('%d.%m.%Y')}: графика на  {title} пока нет"
+
+    values = ws.get_all_values()
+    if not values:
+        return f"{day.strftime('%d.%m.%Y')}: нет данных"
+
+    header = values[0]
+    rows = values[1:]
+
+    # индекс колонки даты
+    date_idx = 0
+    for i, h in enumerate(header):
+        hh = (h or '').strip().lower()
+        if hh in {"дата", "date", "day"}:
+            date_idx = i
+            break
+
+    target_a = day.strftime('%d.%m.%Y')
+    target_b = day.strftime('%Y-%m-%d')
+
+    # Поддержим даты, записанные словами: "2 января 2026"
+    _ru_months = {
+        "января": 1,
+        "февраля": 2,
+        "марта": 3,
+        "апреля": 4,
+        "мая": 5,
+        "июня": 6,
+        "июля": 7,
+        "августа": 8,
+        "сентября": 9,
+        "октября": 10,
+        "ноября": 11,
+        "декабря": 12,
+    }
+
+    def _cell_matches_day(cell_text: str) -> bool:
+        s = (cell_text or '').strip()
+        if not s:
+            return False
+
+        # прямые форматы
+        if s in {target_a, target_b}:
+            return True
+
+        # попробуем распарсить dd.mm.yyyy
+        try:
+            if len(s) >= 8 and '.' in s:
+                dd, mm, yy = s.split('.', 2)
+                if dd.isdigit() and mm.isdigit() and yy.isdigit():
+                    if int(yy) == day.year and int(mm) == day.month and int(dd) == day.day:
+                        return True
+        except Exception:
+            pass
+
+        # формат "2 января 2026" (и похожие)
+        s_low = ' '.join(s.lower().split())
+        parts = s_low.split(' ')
+        if len(parts) >= 3 and parts[0].isdigit() and parts[2].isdigit():
+            dd = int(parts[0])
+            yy = int(parts[2])
+            mm = _ru_months.get(parts[1])
+            if mm and yy == day.year and mm == day.month and dd == day.day:
+                return True
+
+        return False
+
+    matched = []
+    for r in rows:
+        if date_idx >= len(r):
+            continue
+        cell = (r[date_idx] or '').strip()
+        if _cell_matches_day(cell):
+            matched.append(r)
+
+    if not matched:
+        return f"{day.strftime('%d.%m.%Y')}\nНет событий"
+
+    out_lines = [day.strftime('%d.%m.%Y')]
+
+    # ожидаемые заголовки
+    def col_idx(name: str) -> Optional[int]:
+        for i, h in enumerate(header):
+            if (h or '').strip().lower() == name.lower():
+                return i
+        return None
+
+    idx_type = col_idx('Тип')
+    idx_title = col_idx('Название')
+    idx_loc = col_idx('Локация')
+    idx_emp = col_idx('Сотрудник')
+    idx_duty = col_idx('Дежурный сотрудник')
+    idx_info = col_idx('Инфо')
+
+    for r in matched:
+        if idx_type is not None and idx_type < len(r) and r[idx_type]:
+            out_lines.append(f"Тип: {r[idx_type]}")
+
+        if idx_title is not None and idx_title < len(r) and r[idx_title]:
+            out_lines.append(f"Название: {r[idx_title]}")
+
+        if idx_loc is not None and idx_loc < len(r) and r[idx_loc]:
+            out_lines.append(f"Локация: {r[idx_loc]}")
+
+        emp = r[idx_emp] if idx_emp is not None and idx_emp < len(r) else ''
+        duty = r[idx_duty] if idx_duty is not None and idx_duty < len(r) else ''
+        if emp or duty:
+            if emp and duty:
+                out_lines.append(f"Сотрудник: {emp}, {duty}")
+            else:
+                out_lines.append(f"Сотрудник: {emp or duty}")
+
+        if idx_info is not None and idx_info < len(r) and r[idx_info]:
+            out_lines.append(f"Инфо: {r[idx_info]}")
+
+        out_lines.append("")  # пустая строка между событиями
+
+    return "\n".join(out_lines).rstrip()

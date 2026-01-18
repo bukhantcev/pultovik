@@ -2,6 +2,8 @@
 from pathlib import Path
 import tempfile
 import pandas as pd
+import calendar
+from datetime import date
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
@@ -12,7 +14,7 @@ from keyboards.inline import get_month_pick_inline, get_edit_employees_inline_kb
 from services.excel_import import import_events_from_excel
 from services.excel_export import export_month_schedule, file_as_input, month_caption, export_spectacles_table
 from services.auto_assign import auto_assign_events_for_month
-from services.google_sheets import publish_schedule_to_sheets
+from services.google_sheets import publish_schedule_to_sheets, fetch_schedule_for_date
 from db import DBI
 
 router = Router()
@@ -40,6 +42,31 @@ async def _ask_unknown_spectacle(message: Message, state: FSMContext, title: str
         f"Неизвестный спектакль:\n<b>{title}</b>\nВыберите сотрудников и нажмите «Сохранить».",
         reply_markup=kb.as_markup()
     )
+
+
+# Рендерим inline-календарь месяца
+def _month_calendar_kb(year: int, month: int, prefix: str = 'viewday:'):
+    cal = calendar.Calendar(firstweekday=0)  # Monday
+    kb = InlineKeyboardBuilder()
+
+    # Header row
+    for d in ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]:
+        kb.button(text=d, callback_data="noop")
+
+    # Days grid
+    for week in cal.monthdayscalendar(year, month):
+        for day in week:
+            if day == 0:
+                kb.button(text=" ", callback_data="noop")
+            else:
+                kb.button(text=str(day), callback_data=f"{prefix}{year:04d}-{month:02d}-{day:02d}")
+
+    kb.adjust(7)
+    return kb.as_markup()
+
+@router.callback_query(F.data == 'noop')
+async def noop_callback(callback: CallbackQuery):
+    await callback.answer()
 
 # Handler for starting import
 @router.message(F.text == "Импорт расписания")
@@ -285,26 +312,37 @@ async def view_schedule_pick(callback: CallbackQuery, state: FSMContext):
     except Exception:
         await callback.answer("Неверный месяц", show_alert=True); return
 
-    # Экспортируем как есть, без автоназначения
+    # Рендерим календарь кнопками (числа месяца)
+    await callback.message.answer(
+        f"{RU_MONTHS[month-1]} {year}",
+        reply_markup=_month_calendar_kb(year, month, prefix='viewday:')
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith('viewday:'))
+async def view_schedule_day_pick(callback: CallbackQuery, state: FSMContext):
+    data = callback.data or ''
+    if not data.startswith('viewday:'):
+        await callback.answer()
+        return
+
     try:
-        path, count = export_month_schedule(year, month)
+        y, m, d = map(int, data.split(':', 1)[1].split('-', 2))
+        day_dt = date(y, m, d)
+    except Exception:
+        await callback.answer("Неверная дата", show_alert=True)
+        return
+
+    try:
+        text = fetch_schedule_for_date(day_dt)
     except Exception as e:
-        await callback.message.answer(f"Ошибка формирования расписания: {e}")
-        await callback.answer(); return
+        await callback.message.answer(f"Не удалось получить данные из Google Sheets: {e}")
+        await callback.answer()
+        return
 
-    if (count or 0) > 0:
-        try:
-            await callback.message.answer_document(
-                file_as_input(path),
-                caption=f"Расписание на {RU_MONTHS[month-1]} {year} — {count} событ."
-            )
-        except Exception as e:
-            await callback.message.answer(f"Не удалось отправить файл: {e}")
-    else:
-        await callback.message.answer(
-            f"Пока нет расписания за {RU_MONTHS[month-1]} {year}"
-        )
-
+    # Сообщение ниже календаря
+    await callback.message.answer(text)
     await callback.answer("Готово")
 
 @router.message(F.text == "Спектакли (таблица)")
